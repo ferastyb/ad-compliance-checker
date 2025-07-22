@@ -3,7 +3,8 @@
 try:
     import streamlit as st
 except ModuleNotFoundError:
-    raise ImportError("Streamlit is not installed. Please install it using 'pip install streamlit' and try again.")
+    import sys
+    sys.exit("Streamlit is not installed. Please run this script in an environment where Streamlit is available.")
 
 import requests
 from bs4 import BeautifulSoup
@@ -29,7 +30,6 @@ def fetch_ad_html(ad_number):
     except Exception as e:
         st.error(f"Error fetching AD: {e}")
     return None
-
 
 def extract_effective_date(html):
     soup = BeautifulSoup(html, "html.parser")
