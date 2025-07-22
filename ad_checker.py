@@ -1,21 +1,49 @@
+# ad_checker.py (AD Compliance Checker UI)
 
-import streamlit as st
-import pandas as pd
+try:
+    import streamlit as st
+except ModuleNotFoundError:
+    raise ImportError("Streamlit is not installed. Please install it using 'pip install streamlit' and try again.")
 
-st.set_page_config(page_title="AD Compliance Checker", layout="wide")
+import requests
+from bs4 import BeautifulSoup
+import re
 
-st.title("📋 Airworthiness Directive (AD) Compliance Checker")
+st.set_page_config(page_title="AD Compliance Checker", layout="centered")
+st.title("🛠️ AD Compliance Checker")
 
-st.markdown("Use this tool to verify compliance of your aircraft against applicable Airworthiness Directives.")
+ad_number_input = st.text_input("Enter AD Number (e.g., 2020-06-092):")
 
-uploaded_ad_file = st.file_uploader("Upload AD PDF", type="pdf", help="Upload an Airworthiness Directive document.")
-uploaded_aircraft_data = st.file_uploader("Upload Aircraft Compliance Data", type=["csv", "xlsx"], help="Upload your aircraft's compliance record.")
+@st.cache_data(show_spinner=False)
+def fetch_ad_html(ad_number):
+    try:
+        search_url = f"https://www.google.com/search?q=site%3Afederalregister.gov+{ad_number.replace(' ', '+')}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(search_url, headers=headers)
+        soup = BeautifulSoup(resp.text, "html.parser")
 
-if uploaded_ad_file and uploaded_aircraft_data:
-    st.info("✅ Files uploaded successfully. Compliance logic to be implemented.")
-    # TODO: Add AD parser, compare with aircraft data
-else:
-    st.warning("⬆️ Please upload both the AD and aircraft compliance file.")
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if "https://www.federalregister.gov/documents/" in href:
+                return requests.get(href).text
+    except Exception as e:
+        st.error(f"Error fetching AD: {e}")
+    return None
 
-st.markdown("---")
-st.markdown("ℹ️ *Future versions will support automated parsing and matching of conditions, thresholds, and actions.*")
+
+def extract_effective_date(html):
+    soup = BeautifulSoup(html, "html.parser")
+    text = soup.get_text(separator="\n")
+
+    match = re.search(r"(?i)(Effective Date\s*[:\-]\s*|This AD is effective )([A-Z][a-z]+ \d{1,2}, \d{4})", text)
+    if match:
+        return match.group(2)
+    return "Not found"
+
+if ad_number_input:
+    html = fetch_ad_html(ad_number_input)
+    if html:
+        effective_date = extract_effective_date(html)
+        st.success(f"✅ Effective Date: {effective_date}")
+    else:
+        st.warning("No AD found or unable to fetch.")
