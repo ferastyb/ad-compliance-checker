@@ -1,3 +1,5 @@
+# ad_checker.py (Standalone AD Compliance Checker)
+
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
@@ -8,42 +10,37 @@ st.title("🛠️ AD Compliance Checker")
 
 ad_number_input = st.text_input("Enter AD Number (e.g., 2020-06-14):")
 
-def search_federal_register(ad_number):
-    """Search federalregister.gov API for the AD number"""
-    base_url = "https://www.federalregister.gov/api/v1/documents.json"
-    params = {"conditions[term]": ad_number, "per_page": 5}
-    headers = {"User-Agent": "Mozilla/5.0"}
+def fetch_ad_from_federalregister(ad_number):
     try:
-        response = requests.get(base_url, params=params, headers=headers)
-        data = response.json()
-        for result in data.get("results", []):
-            if ad_number in result.get("document_number", ""):
-                return result.get("html_url", "")
-    except Exception as e:
-        st.error(f"🔧 API error: {e}")
-    return None
+        # Build a likely URL for the AD document
+        url = f"https://www.federalregister.gov/documents/{ad_number.replace('-', '/')}/"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers)
+        if response.status_code != 200:
+            return None, None
 
-def extract_effective_date(url):
-    """Scrape the effective date from the AD HTML page"""
-    try:
-        response = requests.get(url)
         soup = BeautifulSoup(response.text, "html.parser")
-        text = soup.get_text(separator="\n")
+        text = soup.get_text("\n")
 
-        match = re.search(r"(Effective Date\s*[:\-]\s*|This AD is effective )([A-Z][a-z]+ \d{1,2}, \d{4})", text)
-        if match:
-            return match.group(2)
+        # Extract title
+        title_tag = soup.find("h1", class_="document-title")
+        title = title_tag.get_text(strip=True) if title_tag else "No title found"
+
+        # Extract effective date
+        match = re.search(r"(?i)(Effective Date\s*[:\-]\s*|This AD is effective )(\w+ \d{1,2}, \d{4})", text)
+        effective_date = match.group(2) if match else "Not found"
+
+        return title, effective_date
     except Exception as e:
-        st.error(f"Scraping error: {e}")
-    return "Not found"
+        st.error(f"Error: {e}")
+        return None, None
 
-# Main logic
 if ad_number_input:
-    with st.spinner("Searching for AD..."):
-        ad_url = search_federal_register(ad_number_input)
-        if ad_url:
-            effective_date = extract_effective_date(ad_url)
-            st.success(f"✅ AD Found: [View Document]({ad_url})")
-            st.info(f"📅 Effective Date: **{effective_date}**")
-        else:
-            st.error("❌ AD not found. Please check the number and try again.")
+    with st.spinner("Searching for AD on federalregister.gov..."):
+        title, effective_date = fetch_ad_from_federalregister(ad_number_input)
+
+    if title:
+        st.success(f"✅ Title: {title}")
+        st.success(f"📅 Effective Date: {effective_date}")
+    else:
+        st.error("❌ AD not found. Please check the number and try again.")
