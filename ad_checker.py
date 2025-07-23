@@ -13,7 +13,7 @@ import re
 st.set_page_config(page_title="AD Compliance Checker", layout="centered")
 st.title("🛠️ AD Compliance Checker")
 
-ad_number_input = st.text_input("Enter AD Number (e.g., 2020-06-092):")
+ad_number_input = st.text_input("Enter AD Number (e.g., 2020-06-92):")
 
 @st.cache_data(show_spinner=False)
 def fetch_ad_html(ad_number):
