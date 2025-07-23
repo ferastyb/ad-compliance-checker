@@ -1,5 +1,3 @@
-# ad_checker.py
-
 import streamlit as st
 import requests
 
@@ -11,22 +9,23 @@ ad_number = st.text_input("Enter AD Number (e.g., 2020-06-14):").strip()
 def fetch_ad_data(ad_number):
     base_url = "https://www.federalregister.gov/api/v1/documents.json"
     headers = {"User-Agent": "Mozilla/5.0"}
-
     try:
         response = requests.get(
             base_url,
-            params={"conditions[term]": ad_number, "per_page": 10},
+            params={"conditions[term]": ad_number, "per_page": 20},
             headers=headers,
             timeout=10
         )
         response.raise_for_status()
-
         results = response.json().get("results", [])
+        
         for doc in results:
-            title = doc.get("title", "")
-            if ad_number.lower() in title.lower():
+            title = doc.get("title", "").lower()
+            html_url = doc.get("html_url", "").lower()
+            # Match AD number in title or URL
+            if ad_number.lower() in title or ad_number.replace('-', '') in html_url:
                 return {
-                    "title": title,
+                    "title": doc.get("title"),
                     "effective_date": doc.get("effective_on"),
                     "html_url": doc.get("html_url"),
                     "pdf_url": doc.get("pdf_url")
@@ -34,7 +33,6 @@ def fetch_ad_data(ad_number):
 
     except requests.RequestException as e:
         st.error(f"Request failed: {e}")
-
     return None
 
 if ad_number:
