@@ -11,35 +11,27 @@ ad_number = st.text_input("Enter AD Number (e.g., 2020-06-14):").strip()
 def fetch_ad_data(ad_number):
     base_url = "https://www.federalregister.gov/api/v1/documents.json"
     headers = {"User-Agent": "Mozilla/5.0"}
-    
-    search_terms = [
-        ad_number,
-        f"AD {ad_number}",
-        ad_number.replace("-", "")
-    ]
 
     try:
-        for term in search_terms:
-            response = requests.get(
-                base_url,
-                params={"conditions[term]": term, "per_page": 20},
-                headers=headers,
-                timeout=10
-            )
-            response.raise_for_status()
+        response = requests.get(
+            base_url,
+            params={"conditions[term]": f'"AD {ad_number}"', "per_page": 20},
+            headers=headers,
+            timeout=10
+        )
+        response.raise_for_status()
 
-            results = response.json().get("results", [])
-            for doc in results:
-                doc_num = doc.get("document_number", "")
-                title = doc.get("title", "")
-                
-                if ad_number in doc_num or ad_number in title or f"AD {ad_number}" in title:
-                    return {
-                        "title": title,
-                        "effective_date": doc.get("effective_on"),
-                        "html_url": doc.get("html_url"),
-                        "pdf_url": doc.get("pdf_url")
-                    }
+        results = response.json().get("results", [])
+        for doc in results:
+            title = doc.get("title", "")
+            if ad_number in title:
+                return {
+                    "ad_number": ad_number,
+                    "title": title,
+                    "effective_date": doc.get("effective_on"),
+                    "html_url": doc.get("html_url"),
+                    "pdf_url": doc.get("pdf_url")
+                }
 
     except requests.RequestException as e:
         st.error(f"Request failed: {e}")
