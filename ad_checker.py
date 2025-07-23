@@ -2,47 +2,48 @@ import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 import re
-from urllib.parse import urlparse, parse_qs
 
 st.set_page_config(page_title="AD Compliance Checker", layout="centered")
 st.title("🛠️ AD Compliance Checker")
 
 ad_number_input = st.text_input("Enter AD Number (e.g., 2020-06-14):")
 
-@st.cache_data(show_spinner=False)
-def fetch_ad_html(ad_number):
-    search_url = f"https://www.google.com/search?q=site:federalregister.gov+{ad_number.replace(' ', '+')}"
+def search_federal_register(ad_number):
+    """Search federalregister.gov API for the AD number"""
+    base_url = "https://www.federalregister.gov/api/v1/documents.json"
+    params = {"conditions[term]": ad_number, "per_page": 5}
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        resp = requests.get(search_url, headers=headers, timeout=10)
-        soup = BeautifulSoup(resp.text, "html.parser")
-
-        # Find redirect links like /url?q=https://www.federalregister.gov/...
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if href.startswith("/url?q=https://www.federalregister.gov"):
-                real_url = parse_qs(urlparse(href).query).get("q", [None])[0]
-                if real_url:
-                    ad_resp = requests.get(real_url, headers=headers, timeout=10)
-                    if ad_resp.status_code == 200:
-                        return ad_resp.text
+        response = requests.get(base_url, params=params, headers=headers)
+        data = response.json()
+        for result in data.get("results", []):
+            if ad_number in result.get("document_number", ""):
+                return result.get("html_url", "")
     except Exception as e:
-        st.error(f"🔧 Error fetching AD: {e}")
+        st.error(f"🔧 API error: {e}")
     return None
 
-def extract_effective_date(html):
-    soup = BeautifulSoup(html, "html.parser")
-    text = soup.get_text(separator="\n")
+def extract_effective_date(url):
+    """Scrape the effective date from the AD HTML page"""
+    try:
+        response = requests.get(url)
+        soup = BeautifulSoup(response.text, "html.parser")
+        text = soup.get_text(separator="\n")
 
-    match = re.search(r"(Effective Date\s*[:\-]\s*|This AD is effective\s+)([A-Z][a-z]+ \d{1,2}, \d{4})", text)
-    if match:
-        return match.group(2)
+        match = re.search(r"(Effective Date\s*[:\-]\s*|This AD is effective )([A-Z][a-z]+ \d{1,2}, \d{4})", text)
+        if match:
+            return match.group(2)
+    except Exception as e:
+        st.error(f"Scraping error: {e}")
     return "Not found"
 
+# Main logic
 if ad_number_input:
-    html = fetch_ad_html(ad_number_input)
-    if html:
-        effective_date = extract_effective_date(html)
-        st.success(f"✅ Effective Date: {effective_date}")
-    else:
-        st.error("❌ AD not found. Please check the number and try again.")
+    with st.spinner("Searching for AD..."):
+        ad_url = search_federal_register(ad_number_input)
+        if ad_url:
+            effective_date = extract_effective_date(ad_url)
+            st.success(f"✅ AD Found: [View Document]({ad_url})")
+            st.info(f"📅 Effective Date: **{effective_date}**")
+        else:
+            st.error("❌ AD not found. Please check the number and try again.")
