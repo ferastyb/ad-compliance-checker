@@ -9,32 +9,40 @@ ad_number = st.text_input("Enter AD Number (e.g., 2020-06-14):").strip()
 def fetch_ad_data(ad_number):
     base_url = "https://www.federalregister.gov/api/v1/documents.json"
     headers = {"User-Agent": "Mozilla/5.0"}
+    
     try:
-        response = requests.get(
-            base_url,
-            params={"conditions[term]": "airworthiness directives", "per_page": 50},
-            headers=headers,
-            timeout=10
-        )
-        response.raise_for_status()
-        results = response.json().get("results", [])
+        # Try first 3 pages of results (150 entries total)
+        for page in range(1, 4):
+            response = requests.get(
+                base_url,
+                params={
+                    "conditions[term]": "airworthiness directives",
+                    "order": "newest",
+                    "per_page": 50,
+                    "page": page
+                },
+                headers=headers,
+                timeout=10
+            )
+            response.raise_for_status()
+            results = response.json().get("results", [])
 
-        for doc in results:
-            title = doc.get("title", "").lower()
-            if f"ad {ad_number.lower()}" in title:
-                return {
-                    "title": doc.get("title"),
-                    "effective_date": doc.get("effective_on"),
-                    "html_url": doc.get("html_url"),
-                    "pdf_url": doc.get("pdf_url")
-                }
-
+            for doc in results:
+                title = doc.get("title", "").lower()
+                if ad_number.lower() in title:
+                    return {
+                        "title": doc.get("title"),
+                        "effective_date": doc.get("effective_on"),
+                        "html_url": doc.get("html_url"),
+                        "pdf_url": doc.get("pdf_url")
+                    }
     except requests.RequestException as e:
         st.error(f"Request failed: {e}")
+    
     return None
 
 if ad_number:
-    with st.spinner("🔍 Searching for Airworthiness Directive..."):
+    with st.spinner("🔍 Searching Federal Register..."):
         data = fetch_ad_data(ad_number)
 
     if data:
