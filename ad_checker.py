@@ -1,50 +1,70 @@
-# ad_checker.py
+# ad_checker.py (AD Compliance Checker UI)
 
-import streamlit as st
+try:
+    import streamlit as st
+except ModuleNotFoundError:
+    raise ImportError("Streamlit is not installed. Please install it using 'pip install streamlit' and try again.")
+
 import requests
+from bs4 import BeautifulSoup
+import re
 
 st.set_page_config(page_title="AD Compliance Checker", layout="centered")
 st.title("🛠️ AD Compliance Checker")
 
-ad_number = st.text_input("Enter AD Number (e.g., 2020-06-14):").strip()
+ad_number_input = st.text_input("Enter AD Number (e.g., 2020-06-14):")
 
-def fetch_ad_data(ad_number):
-    base_url = "https://www.federalregister.gov/api/v1/documents.json"
-    headers = {"User-Agent": "Mozilla/5.0"}
-
+@st.cache_data(show_spinner=False)
+def fetch_ad_html(ad_number):
     try:
-        response = requests.get(
-            base_url,
-            params={"conditions[term]": ad_number, "per_page": 10},
-            headers=headers,
-            timeout=10
-        )
-        response.raise_for_status()
+        search_url = f"https://www.google.com/search?q=site%3Afederalregister.gov+{ad_number.replace(' ', '+')}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(search_url, headers=headers)
+        soup = BeautifulSoup(resp.text, "html.parser")
 
-        results = response.json().get("results", [])
-        for doc in results:
-            if ad_number == doc.get("document_number"):
-                return {
-                    "title": doc.get("title"),
-                    "effective_date": doc.get("effective_on"),
-                    "html_url": doc.get("html_url"),
-                    "pdf_url": doc.get("pdf_url")
-                }
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if "https://www.federalregister.gov/documents/" in href:
+                ad_url = href.split("&")[0].replace("/url?q=", "")
+                ad_html = requests.get(ad_url, headers=headers).text
+                return ad_url, ad_html
+    except Exception as e:
+        st.error(f"Error fetching AD: {e}")
+    return None, None
 
-    except requests.RequestException as e:
-        st.error(f"Request failed: {e}")
+def extract_effective_date(html):
+    soup = BeautifulSoup(html, "html.parser")
+    text = soup.get_text(separator="\n")
 
-    return None
+    patterns = [
+        r"Effective Date\s*[:\-]\s*([A-Z][a-z]+ \d{1,2}, \d{4})",
+        r"This AD is effective\s+([A-Z][a-z]+ \d{1,2}, \d{4})",
+        r"DATES\s*[:\-]?\s*This AD is effective\s+([A-Z][a-z]+ \d{1,2}, \d{4})"
+    ]
 
-if ad_number:
-    with st.spinner("🔍 Searching Federal Register..."):
-        data = fetch_ad_data(ad_number)
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return match.group(1)
 
-    if data:
-        st.success(f"✅ Found AD {ad_number}")
-        st.write(f"**Title:** {data['title']}")
-        st.write(f"**Effective Date:** {data['effective_date']}")
-        st.markdown(f"[🔗 View Full AD (HTML)]({data['html_url']})")
-        st.markdown(f"[📄 View PDF]({data['pdf_url']})")
+    return "Not found"
+
+def extract_title(html):
+    soup = BeautifulSoup(html, "html.parser")
+    h1 = soup.find("h1")
+    return h1.text.strip() if h1 else "Unknown"
+
+if ad_number_input:
+    ad_url, html = fetch_ad_html(ad_number_input)
+    if html:
+        title = extract_title(html)
+        effective_date = extract_effective_date(html)
+
+        st.success(f"✅ Found AD {ad_number_input}")
+        st.markdown(f"**Title:** {title}")
+        st.markdown(f"**Effective Date:** {effective_date}")
+
+        st.markdown(f"\n🔗 [View Full AD (HTML)]({ad_url})")
+        st.markdown(f"🗎 [View PDF]({ad_url.replace('/documents/', '/pdf/')})")
     else:
-        st.error("❌ AD not found. Please check the number exactly as it appears (e.g., 2020-06-14).")
+        st.error("❌ AD not found. Please check the number and try again.")
