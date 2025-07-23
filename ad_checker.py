@@ -2,36 +2,48 @@
 
 import streamlit as st
 import requests
+import re
 
 st.set_page_config(page_title="AD Compliance Checker", layout="centered")
 st.title("🛠️ Airworthiness Directive (AD) Compliance Checker")
 
-# Prompt for AD Number
 ad_number = st.text_input("Enter AD Number (e.g., 2020-06-14):").strip()
 
-# Function to query the Federal Register API for AD info
-def fetch_ad_info(ad_number):
-    api_url = f"https://www.federalregister.gov/api/v1/documents.json?conditions[term]={ad_number}&per_page=5"
+def fetch_federal_register_doc(ad_number):
+    """
+    Search for the AD using the Federal Register API.
+    """
+    base_url = "https://www.federalregister.gov/api/v1/documents.json"
+    query = {
+        "conditions[term]": ad_number,
+        "per_page": 5,
+        "order": "newest"
+    }
     try:
-        response = requests.get(api_url, headers={"User-Agent": "AD-Checker/1.0"})
+        response = requests.get(base_url, params=query, headers={"User-Agent": "Mozilla/5.0"})
         response.raise_for_status()
-        results = response.json().get("results", [])
-        for item in results:
-            if ad_number in item.get("document_number", ""):
-                effective_date = item.get("effective_on", "Unknown")
-                link = item.get("html_url", "#")
-                return effective_date, link
-        return None, None
+        docs = response.json().get("results", [])
+        for doc in docs:
+            if ad_number in doc.get("document_number", ""):
+                return {
+                    "effective_date": doc.get("effective_on"),
+                    "html_url": doc.get("html_url"),
+                    "title": doc.get("title"),
+                    "pdf_url": doc.get("pdf_url")
+                }
     except Exception as e:
-        return None, None
+        st.error(f"API error: {e}")
+    return None
 
-# UI Display
 if ad_number:
     with st.spinner("🔍 Searching for AD..."):
-        date, link = fetch_ad_info(ad_number)
+        result = fetch_federal_register_doc(ad_number)
 
-    if date and link:
-        st.success(f"✅ AD Found: Effective Date is **{date}**")
-        st.markdown(f"[🔗 View Full AD on FederalRegister.gov]({link})")
+    if result:
+        st.success(f"✅ Found AD {ad_number}")
+        st.write(f"**Title:** {result['title']}")
+        st.write(f"**Effective Date:** {result['effective_date']}")
+        st.markdown(f"[🔗 View AD (HTML)]({result['html_url']})")
+        st.markdown(f"[📄 View PDF]({result['pdf_url']})")
     else:
         st.error("❌ AD not found. Please check the number and try again.")
