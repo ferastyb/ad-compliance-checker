@@ -23,9 +23,10 @@ def fetch_ad_data(ad_number):
 
         results = response.json().get("results", [])
         for doc in results:
-            if ad_number == doc.get("document_number"):
+            title = doc.get("title", "")
+            if ad_number.lower() in title.lower():
                 return {
-                    "title": doc.get("title"),
+                    "title": title,
                     "effective_date": doc.get("effective_on"),
                     "html_url": doc.get("html_url"),
                     "pdf_url": doc.get("pdf_url")
@@ -43,7 +44,7 @@ if ad_number:
     if data:
         st.success(f"✅ Found AD {ad_number}")
         st.write(f"**Title:** {data['title']}")
-        st.write(f"**Effective Date:** {data['effective_date']}")
+        st.write(f"**Effective Date:** {data['effective_date'] or 'Not found'}")
         st.markdown(f"[🔗 View Full AD (HTML)]({data['html_url']})")
         st.markdown(f"[📄 View PDF]({data['pdf_url']})")
     else:
