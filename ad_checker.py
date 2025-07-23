@@ -1,48 +1,58 @@
-# ad_checker.py
-
 import streamlit as st
 import requests
-from urllib.parse import quote
+from bs4 import BeautifulSoup
 
 st.set_page_config(page_title="AD Compliance Checker", layout="centered")
 st.title("🛠️ AD Compliance Checker")
 
-ad_number = st.text_input("Enter AD Number (e.g., 2020-06-14):").strip()
+ad_input = st.text_input("Enter AD Number (e.g., 2020‑06‑14):").strip()
 
-def fetch_ad_data(ad_number: str):
-    base_url = "https://www.federalregister.gov/api/v1/documents.json"
-    params = {
-        "conditions[term]": ad_number,
-        "per_page": 10
+def fetch_ad_from_faa(ad_number):
+    """Search FAA DRS and parse AD page for effective date."""
+    search_url = f"https://drs.faa.gov/browse/ADFRAWD/doctypeDetails?docType=ADFRAWD&docName={ad_number}"
+    resp = requests.get(search_url, timeout=10)
+    if resp.status_code != 200:
+        return None
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    # Look for key elements like “Issue Date” or “Effective”
+    rows = soup.select("table tr")
+    info = {}
+    for tr in rows:
+        cols = [c.get_text(strip=True) for c in tr.find_all("td")]
+        if len(cols) == 2:
+            k, v = cols
+            info[k] = v
+
+    if not info:
+        return None
+
+    title = soup.select_one("h2") and soup.select_one("h2").get_text(strip=True)
+    effective = info.get("Issue Date") or info.get("Effective Date") or info.get("Effective On")
+    pdf_link = soup.select_one("a[href*='.pdf']")
+    pdf_url = requests.compat.urljoin(search_url, pdf_link["href"]) if pdf_link else None
+
+    return {
+        "title": title or "N/A",
+        "effective_date": effective or "N/A",
+        "html_url": search_url,
+        "pdf_url": pdf_url,
+        "info": info
     }
-    headers = {"User-Agent": "Mozilla/5.0"}
 
-    try:
-        resp = requests.get(base_url, params=params, headers=headers, timeout=10)
-        resp.raise_for_status()
-        results = resp.json().get("results", [])
-        for doc in results:
-            if ad_number == doc.get("document_number"):
-                return {
-                    "title": doc.get("title"),
-                    "effective_date": doc.get("effective_on"),
-                    "html_url": doc.get("html_url"),
-                    "pdf_url": doc.get("pdf_url")
-                }
-    except requests.RequestException as e:
-        st.error(f"Request failed: {e}")
-
-    return None
-
-if ad_number:
-    with st.spinner("🔍 Searching Federal Register..."):
-        data = fetch_ad_data(ad_number)
+if ad_input:
+    with st.spinner("🔍 Querying FAA AD database..."):
+        data = fetch_ad_from_faa(ad_input)
 
     if data:
-        st.success(f"✅ Found AD {ad_number}")
+        st.success(f"✅ Found AD {ad_input}")
         st.write(f"**Title:** {data['title']}")
         st.write(f"**Effective Date:** {data['effective_date']}")
-        st.markdown(f"[🔗 View Full AD (HTML)]({data['html_url']})")
-        st.markdown(f"[📄 View PDF]({data['pdf_url']})")
+        st.markdown(f"[🔗 View AD in Browser]({data['html_url']})")
+        if data["pdf_url"]:
+            st.markdown(f"[📄 Download PDF]({data['pdf_url']})")
+        else:
+            st.info("PDF link not detected.")
     else:
-        st.error("❌ AD not found. Please check the number exactly as it appears.")
+        st.error("❌ AD not found or page structure changed.")
+
