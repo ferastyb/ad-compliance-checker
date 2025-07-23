@@ -1,4 +1,4 @@
-# ad_checker.py (AD Compliance Checker UI)
+# ad_checker.py (Standalone AD Compliance Checker)
 
 import streamlit as st
 import requests
@@ -10,54 +10,56 @@ st.title("🛠️ AD Compliance Checker")
 
 ad_number_input = st.text_input("Enter AD Number (e.g., 2020-06-14):")
 
-@st.cache_data(show_spinner=False)
-def get_ad_document_number(ad_number):
+def fetch_ad_url(ad_number):
     """
-    Searches the Federal Register API using the AD number (e.g., 2020-06-14) and retrieves the corresponding document number.
+    Try fetching the federalregister.gov AD document link via Google Search.
     """
-    url = "https://www.federalregister.gov/api/v1/documents.json"
-    params = {
-        "per_page": 5,
-        "order": "relevance",
-        "conditions[term]": f"Airworthiness Directive {ad_number}"
-    }
+    query = f"site:federalregister.gov {ad_number}"
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        resp = requests.get(url, params=params)
-        data = resp.json()
-        if data.get("results"):
-            return data["results"][0]["document_number"]
+        response = requests.get(f"https://www.google.com/search?q={query}", headers=headers)
+        soup = BeautifulSoup(response.text, "html.parser")
+        for link in soup.find_all("a", href=True):
+            href = link["href"]
+            if "https://www.federalregister.gov/documents/" in href:
+                # Google result URLs are usually like /url?q=real_url
+                match = re.search(r"/url\?q=(https://www\.federalregister\.gov/documents/[^&]+)", href)
+                if match:
+                    return match.group(1)
     except Exception as e:
-        st.error(f"Error retrieving AD document: {e}")
+        st.error(f"🔧 Error while searching for AD: {e}")
     return None
 
-@st.cache_data(show_spinner=False)
-def fetch_ad_html_by_document(document_number):
+def extract_effective_date_from_url(url):
     try:
-        url = f"https://www.federalregister.gov/documents/full_text/html/{document_number}"
-        resp = requests.get(url)
-        if resp.status_code == 200:
-            return resp.text
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers)
+        if resp.status_code != 200:
+            return None
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        text = soup.get_text(separator="\n")
+
+        # Try finding "Effective Date" or "This AD is effective" phrases
+        match = re.search(r"(?i)(Effective Date\s*[:\-]\s*|This AD is effective )([A-Z][a-z]+ \d{1,2}, \d{4})", text)
+        if match:
+            return match.group(2)
     except Exception as e:
-        st.error(f"Error fetching AD HTML: {e}")
+        st.error(f"🔧 Failed to extract AD details: {e}")
     return None
-
-def extract_effective_date(html):
-    soup = BeautifulSoup(html, "html.parser")
-    text = soup.get_text(separator="\n")
-
-    match = re.search(r"(?i)(Effective Date\s*[:\-]\s*|This AD is effective )([A-Z][a-z]+ \d{1,2}, \d{4})", text)
-    if match:
-        return match.group(2)
-    return "Not found"
 
 if ad_number_input:
-    document_number = get_ad_document_number(ad_number_input)
-    if document_number:
-        html = fetch_ad_html_by_document(document_number)
-        if html:
-            effective_date = extract_effective_date(html)
-            st.success(f"✅ Effective Date: {effective_date}")
-        else:
-            st.error("❌ Failed to retrieve the full text of the AD.")
+    with st.spinner("🔍 Searching for the AD..."):
+        ad_url = fetch_ad_url(ad_number_input.strip())
+
+    if ad_url:
+        st.markdown(f"📄 [View AD on federalregister.gov]({ad_url})")
+
+        with st.spinner("📑 Extracting effective date..."):
+            date = extract_effective_date_from_url(ad_url)
+            if date:
+                st.success(f"✅ Effective Date: {date}")
+            else:
+                st.warning("⚠️ Effective date not found in the AD document.")
     else:
         st.error("❌ AD not found. Please check the number and try again.")
