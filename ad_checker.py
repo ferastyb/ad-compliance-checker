@@ -1,4 +1,4 @@
-# ad_checker.py (Standalone AD Compliance Checker)
+# ad_checker.py (AD Compliance Checker UI)
 
 import streamlit as st
 import requests
@@ -10,37 +10,39 @@ st.title("🛠️ AD Compliance Checker")
 
 ad_number_input = st.text_input("Enter AD Number (e.g., 2020-06-14):")
 
-def fetch_ad_from_federalregister(ad_number):
+@st.cache_data(show_spinner=False)
+def fetch_ad_html(ad_number):
     try:
-        # Build a likely URL for the AD document
-        url = f"https://www.federalregister.gov/documents/{ad_number.replace('-', '/')}/"
+        query = f'site:federalregister.gov "Airworthiness Directive {ad_number}"'
+        search_url = f"https://www.google.com/search?q={requests.utils.quote(query)}"
         headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers)
-        if response.status_code != 200:
-            return None, None
-
+        response = requests.get(search_url, headers=headers)
         soup = BeautifulSoup(response.text, "html.parser")
-        text = soup.get_text("\n")
 
-        # Extract title
-        title_tag = soup.find("h1", class_="document-title")
-        title = title_tag.get_text(strip=True) if title_tag else "No title found"
-
-        # Extract effective date
-        match = re.search(r"(?i)(Effective Date\s*[:\-]\s*|This AD is effective )(\w+ \d{1,2}, \d{4})", text)
-        effective_date = match.group(2) if match else "Not found"
-
-        return title, effective_date
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            match = re.search(r"https://www\.federalregister\.gov/documents/\d{4}/\d{2}/\d{2}/[^"]+", href)
+            if match:
+                ad_url = match.group(0)
+                page = requests.get(ad_url, headers=headers)
+                return ad_url, page.text
     except Exception as e:
-        st.error(f"Error: {e}")
-        return None, None
+        st.error(f"Error fetching AD: {e}")
+    return None, None
+
+def extract_effective_date(html):
+    soup = BeautifulSoup(html, "html.parser")
+    text = soup.get_text(separator="\n")
+    match = re.search(r"(?i)(Effective Date\s*[:\-]\s*|This AD is effective )([A-Z][a-z]+ \d{1,2}, \d{4})", text)
+    if match:
+        return match.group(2)
+    return "Not found"
 
 if ad_number_input:
-    with st.spinner("Searching for AD on federalregister.gov..."):
-        title, effective_date = fetch_ad_from_federalregister(ad_number_input)
-
-    if title:
-        st.success(f"✅ Title: {title}")
-        st.success(f"📅 Effective Date: {effective_date}")
+    ad_url, html = fetch_ad_html(ad_number_input)
+    if html:
+        effective_date = extract_effective_date(html)
+        st.success(f"✅ Effective Date: {effective_date}")
+        st.markdown(f"🔗 [View AD on Federal Register]({ad_url})")
     else:
         st.error("❌ AD not found. Please check the number and try again.")
