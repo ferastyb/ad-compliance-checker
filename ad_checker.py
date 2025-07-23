@@ -2,54 +2,34 @@
 
 import streamlit as st
 import requests
-from bs4 import BeautifulSoup
 import re
 
 st.set_page_config(page_title="AD Compliance Checker", layout="centered")
-st.title("🛠️ AD Compliance Checker")
+st.title("🛠️ Airworthiness Directive (AD) Compliance Checker")
 
-ad_number_input = st.text_input("Enter AD Number (e.g., 2020-06-14):")
+ad_number = st.text_input("Enter AD Number (e.g., 2020-06-14):").strip()
 
-def fetch_ad_link(ad_number):
-    query = f"site:federalregister.gov {ad_number}"
-    search_url = f"https://www.google.com/search?q={query}"
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-
+def query_federal_register(ad_number):
+    api_url = f"https://www.federalregister.gov/api/v1/documents.json?conditions[document_number]={ad_number}"
     try:
-        response = requests.get(search_url, headers=headers)
-        soup = BeautifulSoup(response.text, "html.parser")
-
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            match = re.search(r"https://www\.federalregister\.gov/documents/\d+/.+?(?=&)", href)
-            if match:
-                return match.group(0)
+        response = requests.get(api_url, headers={"User-Agent": "AD-Checker"})
+        if response.status_code != 200:
+            return None, None
+        data = response.json()
+        if data["count"] == 0:
+            return None, None
+        entry = data["results"][0]
+        return entry["effective_on"], entry["html_url"]
     except Exception as e:
-        st.error(f"Error during search: {e}")
-    return None
+        st.error(f"Error contacting Federal Register API: {e}")
+        return None, None
 
-def extract_effective_date(ad_url):
-    try:
-        response = requests.get(ad_url)
-        soup = BeautifulSoup(response.text, "html.parser")
-        text = soup.get_text(separator="\n")
+if ad_number:
+    with st.spinner("🔎 Searching Federal Register..."):
+        effective_date, ad_link = query_federal_register(ad_number)
 
-        match = re.search(r"(Effective Date\s*[:\-]\s*|This AD is effective\s+)([A-Z][a-z]+ \d{1,2}, \d{4})", text)
-        if match:
-            return match.group(2)
-    except Exception as e:
-        st.error(f"Error reading AD: {e}")
-    return "Not found"
-
-if ad_number_input:
-    with st.spinner("🔎 Searching for AD..."):
-        ad_url = fetch_ad_link(ad_number_input.strip())
-
-    if ad_url:
-        effective_date = extract_effective_date(ad_url)
+    if effective_date and ad_link:
         st.success(f"✅ Effective Date: {effective_date}")
-        st.markdown(f"[📄 View AD on Federal Register]({ad_url})")
+        st.markdown(f"[📄 View Full AD]({ad_link})")
     else:
         st.error("❌ AD not found. Please check the number and try again.")
