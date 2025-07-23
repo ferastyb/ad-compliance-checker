@@ -10,29 +10,22 @@ ad_number_input = st.text_input("Enter AD Number (e.g., 2020-06-14):")
 @st.cache_data(show_spinner=False)
 def fetch_ad_content(ad_number):
     try:
-        # Search for the AD using the Federal Register API
-        search_url = "https://www.federalregister.gov/api/v1/documents.json"
-        params = {
-            "per_page": 5,
-            "order": "relevance",
-            "conditions[term]": ad_number
-        }
-        response = requests.get(search_url, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-
-        for doc in data.get("results", []):
-            if ad_number in doc.get("document_number", "") or ad_number in doc.get("title", ""):
-                return doc.get("body_html", ""), doc.get("html_url", "")
+        url = f"https://www.federalregister.gov/api/v1/documents/{ad_number}.json"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("body_html", ""), data.get("html_url", "")
+        else:
+            return None, None
     except Exception as e:
         st.error(f"Error contacting federalregister.gov: {e}")
-    return None, None
+        return None, None
 
 def extract_effective_date(html):
     if not html:
         return "Not found"
     
-    text = re.sub(r"<[^>]+>", "", html)  # Strip HTML
+    text = re.sub(r"<[^>]+>", "", html)  # Remove HTML tags
     match = re.search(r"(?i)(Effective Date\s*[:\-]?\s*|This AD is effective )([A-Z][a-z]+ \d{1,2}, \d{4})", text)
     if match:
         return match.group(2)
