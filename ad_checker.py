@@ -12,18 +12,16 @@ def fetch_ad_data(ad_number):
     try:
         response = requests.get(
             base_url,
-            params={"conditions[term]": ad_number, "per_page": 20},
+            params={"conditions[term]": "airworthiness directives", "per_page": 50},
             headers=headers,
             timeout=10
         )
         response.raise_for_status()
         results = response.json().get("results", [])
-        
+
         for doc in results:
             title = doc.get("title", "").lower()
-            html_url = doc.get("html_url", "").lower()
-            # Match AD number in title or URL
-            if ad_number.lower() in title or ad_number.replace('-', '') in html_url:
+            if f"ad {ad_number.lower()}" in title:
                 return {
                     "title": doc.get("title"),
                     "effective_date": doc.get("effective_on"),
@@ -36,7 +34,7 @@ def fetch_ad_data(ad_number):
     return None
 
 if ad_number:
-    with st.spinner("🔍 Searching Federal Register..."):
+    with st.spinner("🔍 Searching for Airworthiness Directive..."):
         data = fetch_ad_data(ad_number)
 
     if data:
