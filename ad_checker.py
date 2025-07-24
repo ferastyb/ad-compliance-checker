@@ -4,7 +4,7 @@ import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 
-st.set_page_config(page_title="FAA AD Compliance Checker", layout="centered")
+st.set_page_config(page_title=" FAA AD Compliance Checker", layout="centered")
 st.title("🛠️ AD Compliance Checker")
 
 ad_number = st.text_input("Enter AD Number (e.g., 2020-06-14):").strip()
