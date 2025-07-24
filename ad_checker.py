@@ -1,58 +1,53 @@
+# ad_checker.py
+
 import streamlit as st
 import requests
-from bs4 import BeautifulSoup
 
 st.set_page_config(page_title="AD Compliance Checker", layout="centered")
 st.title("🛠️ AD Compliance Checker")
 
-ad_input = st.text_input("Enter AD Number (e.g., 2020‑06‑14):").strip()
+ad_number = st.text_input("Enter AD Number (e.g., 2020-06-14):").strip()
 
-def fetch_ad_from_faa(ad_number):
-    """Search FAA DRS and parse AD page for effective date."""
-    search_url = f"https://drs.faa.gov/browse/ADFRAWD/doctypeDetails?docType=ADFRAWD&docName={ad_number}"
-    resp = requests.get(search_url, timeout=10)
-    if resp.status_code != 200:
-        return None
+def fetch_ad_data(ad_number):
+    base_url = "https://www.federalregister.gov/api/v1/documents.json"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    term = ad_number.replace("AD", "").strip()
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    # Look for key elements like “Issue Date” or “Effective”
-    rows = soup.select("table tr")
-    info = {}
-    for tr in rows:
-        cols = [c.get_text(strip=True) for c in tr.find_all("td")]
-        if len(cols) == 2:
-            k, v = cols
-            info[k] = v
+    try:
+        response = requests.get(
+            base_url,
+            params={"conditions[term]": term, "per_page": 50},
+            headers=headers,
+            timeout=10
+        )
+        response.raise_for_status()
 
-    if not info:
-        return None
+        results = response.json().get("results", [])
+        for doc in results:
+            title = doc.get("title", "")
+            doc_num = doc.get("document_number", "")
+            if (ad_number in doc_num) or (ad_number in title) or ("AD" in title and term in title):
+                return {
+                    "title": title,
+                    "effective_date": doc.get("effective_on"),
+                    "html_url": doc.get("html_url"),
+                    "pdf_url": doc.get("pdf_url")
+                }
 
-    title = soup.select_one("h2") and soup.select_one("h2").get_text(strip=True)
-    effective = info.get("Issue Date") or info.get("Effective Date") or info.get("Effective On")
-    pdf_link = soup.select_one("a[href*='.pdf']")
-    pdf_url = requests.compat.urljoin(search_url, pdf_link["href"]) if pdf_link else None
+    except requests.RequestException as e:
+        st.error(f"Request failed: {e}")
 
-    return {
-        "title": title or "N/A",
-        "effective_date": effective or "N/A",
-        "html_url": search_url,
-        "pdf_url": pdf_url,
-        "info": info
-    }
+    return None
 
-if ad_input:
-    with st.spinner("🔍 Querying FAA AD database..."):
-        data = fetch_ad_from_faa(ad_input)
+if ad_number:
+    with st.spinner("🔍 Searching Federal Register..."):
+        data = fetch_ad_data(ad_number)
 
     if data:
-        st.success(f"✅ Found AD {ad_input}")
+        st.success(f"✅ Found AD {ad_number}")
         st.write(f"**Title:** {data['title']}")
         st.write(f"**Effective Date:** {data['effective_date']}")
-        st.markdown(f"[🔗 View AD in Browser]({data['html_url']})")
-        if data["pdf_url"]:
-            st.markdown(f"[📄 Download PDF]({data['pdf_url']})")
-        else:
-            st.info("PDF link not detected.")
+        st.markdown(f"[🔗 View Full AD (HTML)]({data['html_url']})")
+        st.markdown(f"[📄 View PDF]({data['pdf_url']})")
     else:
-        st.error("❌ AD not found or page structure changed.")
-
+        st.error("❌ AD not found. Please check the number exactly as it appears (e.g., 2020-06-14).")
