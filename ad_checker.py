@@ -59,7 +59,7 @@ def extract_details_from_html(html_url):
                         elif isinstance(sibling, str):
                             content += sibling.strip() + "\n"
                     return content.strip()
-            return "Not found"
+            return "Retrieving..."
 
         return {
             "affected_aircraft": find_section_text("Applicability"),
