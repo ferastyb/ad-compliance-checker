@@ -1,57 +1,52 @@
-# ad_checker.py — FAA DRS-Based AD Compliance Checker
+# ad_checker.py
 
 import streamlit as st
 import requests
-from bs4 import BeautifulSoup
-import re
 
-st.set_page_config(page_title="AD Compliance Checker (DRS)", layout="centered")
+st.set_page_config(page_title="AD Compliance Checker", layout="centered")
 st.title("🛠️ AD Compliance Checker")
 
 ad_number = st.text_input("Enter AD Number (e.g., 2020-06-14):").strip()
 
-
-def search_faa_drs(ad_number):
-    """Search FAA DRS site for actual AD numbers."""
-    base_url = "https://drs.faa.gov/search"
+def fetch_ad_data(ad_number):
+    base_url = "https://www.federalregister.gov/api/v1/documents.json"
     headers = {"User-Agent": "Mozilla/5.0"}
 
     try:
-        resp = requests.get(
+        response = requests.get(
             base_url,
-            params={
-                "query": ad_number,
-                "doctype": "ADFRAWD",
-            },
+            params={"conditions[term]": f"Airworthiness Directive {ad_number}", "per_page": 25},
             headers=headers,
             timeout=10
         )
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
+        response.raise_for_status()
+        results = response.json().get("results", [])
 
-        # Look for link(s) that match the AD number
-        ad_links = soup.find_all("a", href=True, string=re.compile(ad_number))
-        for link in ad_links:
-            href = link.get("href")
-            if href and ad_number in link.text:
+        for doc in results:
+            title = doc.get("title", "")
+            if ad_number in title or "airworthiness directive" in title.lower():
                 return {
-                    "title": link.text.strip(),
-                    "url": f"https://drs.faa.gov{href}"
+                    "title": title,
+                    "effective_date": doc.get("effective_on"),
+                    "html_url": doc.get("html_url"),
+                    "pdf_url": doc.get("pdf_url"),
+                    "document_number": doc.get("document_number")
                 }
 
-    except Exception as e:
-        st.error(f"Search failed: {e}")
+    except requests.RequestException as e:
+        st.error(f"❌ Request failed: {e}")
 
     return None
 
-
 if ad_number:
-    with st.spinner("🔍 Searching FAA DRS for AD..."):
-        result = search_faa_drs(ad_number)
+    with st.spinner("🔍 Searching Federal Register..."):
+        data = fetch_ad_data(ad_number)
 
-    if result:
-        st.success(f"✅ Found AD {ad_number}")
-        st.write(f"**Title:** {result['title']}")
-        st.markdown(f"[🔗 View Full AD on FAA DRS]({result['url']})")
+    if data:
+        st.success(f"✅ Found: {data['title']}")
+        st.write(f"**Document Number:** {data['document_number']}")
+        st.write(f"**Effective Date:** {data['effective_date']}")
+        st.markdown(f"[🔗 View Full AD (HTML)]({data['html_url']})")
+        st.markdown(f"[📄 View PDF]({data['pdf_url']})")
     else:
-        st.error("❌ AD not found. Please ensure it's a valid FAA AD number like 2020-06-14.")
+        st.error("❌ AD not found. Please check the number exactly as it appears (e.g., 2020-06-14).")
