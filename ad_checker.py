@@ -7,7 +7,6 @@ import json
 import io
 import csv
 from datetime import datetime
-from PIL import Image as PILImage  # for logo resize + grayscale
 
 # --- PDF (ReportLab) imports ---
 try:
@@ -22,27 +21,15 @@ except Exception:
     REPORTLAB_AVAILABLE = False
 
 # -----------------------------
-# Page setup + Branding
+# Page setup + Branding (UI)
 # -----------------------------
 st.set_page_config(page_title="FAA AD Compliance Checker", layout="centered")
 
 LOGO_URL = "https://www.ferasaviation.info/gallery/FA__logo.png?ts=1754692591"
 SITE_URL = "https://www.ferasaviation.info"
 
-# Fetch logo, resize to 60%, convert to grayscale (UI only)
-try:
-    r_logo = requests.get(LOGO_URL, timeout=10)
-    r_logo.raise_for_status()
-    img_data = PILImage.open(io.BytesIO(r_logo.content))
-    w, h = img_data.size
-    new_size = (max(1, int(w * 0.3)), max(1, int(h * 0.3)))  # 30% scale, guard against 0
-    img_bw = img_data.convert("L").resize(new_size)
-    st.image(img_bw)
-except Exception:
-    # Fallback to a fixed-width original if processing fails
-    st.image(LOGO_URL, width=180)
-
-# Website under logo (clickable)
+# UI logo (unchanged)
+st.image(LOGO_URL, width=180)
 st.markdown(f"[🌐 www.ferasaviation.info]({SITE_URL})")
 
 st.title("🛠️ AD Compliance Checker")
@@ -127,15 +114,39 @@ def extract_details_from_html(html_url: str):
         }
 
 # -----------------------------
-# PDF report builder (PDF uses colored original logo)
+# PDF report builder
 # -----------------------------
 def build_pdf_report(ad_data: dict, details: dict, records: list, logo_url: str, site_url: str) -> bytes:
     """
     Build a PDF summarizing the AD search result, extracted sections, and compliance records.
-    Returns bytes ready for download.
+    Logo is converted to grayscale and resized to 60% above the website link.
     """
     if not REPORTLAB_AVAILABLE:
         raise RuntimeError("ReportLab is not installed. Add 'reportlab' to your requirements.txt.")
+
+    # Try to process logo (grayscale + 60% size) for the PDF only
+    logo_reader_processed = None
+    try:
+        from PIL import Image as PILImage
+        resp = requests.get(logo_url, timeout=10)
+        resp.raise_for_status()
+        pil_img = PILImage.open(io.BytesIO(resp.content)).convert("L")  # grayscale
+        w, h = pil_img.size
+        new_size = (max(1, int(w * 0.3)), max(1, int(h * 0.3)))        # 60% scale
+        pil_img = pil_img.resize(new_size, PILImage.LANCZOS)
+        # Keep as grayscale; ReportLab supports 'L'. Save to buffer.
+        logo_buf = io.BytesIO()
+        pil_img.save(logo_buf, format="PNG")
+        logo_buf.seek(0)
+        logo_reader_processed = ImageReader(logo_buf)
+    except Exception:
+        # Fall back: use original logo as-is (color, default size inference)
+        try:
+            resp = requests.get(logo_url, timeout=10)
+            resp.raise_for_status()
+            logo_reader_processed = ImageReader(io.BytesIO(resp.content))
+        except Exception:
+            logo_reader_processed = None
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -158,16 +169,12 @@ def build_pdf_report(ad_data: dict, details: dict, records: list, logo_url: str,
 
     story = []
 
-    # Header with Logo + site (keep original colored logo for PDF)
-    try:
-        resp = requests.get(logo_url, timeout=10)
-        resp.raise_for_status()
-        logo_reader = ImageReader(io.BytesIO(resp.content))
-        img = Image(logo_reader, width=40*mm, height=14*mm)
-        story.append(img)
-    except Exception:
-        pass
+    # --- Grayscale, 60% logo above website link (PDF only) ---
+    if logo_reader_processed:
+        # let ReportLab infer dimensions from the processed bitmap (already 60%)
+        story.append(Image(logo_reader_processed))
 
+    # Website link
     story.append(Paragraph(f'<font size="12"><a href="{site_url}">{site_url}</a></font>', small))
     story.append(Spacer(1, 6))
 
@@ -178,10 +185,10 @@ def build_pdf_report(ad_data: dict, details: dict, records: list, logo_url: str,
     story.append(Paragraph(f"Generated: {generated_ts}", small))
     story.append(Spacer(1, 12))
 
-    # AD Metadata (AD Number added above Document Number)
+    # AD Metadata
     story.append(Paragraph("Airworthiness Directive", h2))
     meta_data = [
-        ["AD Number", ad_data.get("ad_number") or ""],
+        ["AD Number", ad_data.get("ad_number") or ""],   # AD Number above Document Number
         ["Document Number", ad_data.get("document_number") or ""],
         ["AD Title", ad_data.get("title") or ""],
         ["Publication Date", ad_data.get("publication_date") or "N/A"],
@@ -282,7 +289,7 @@ if ad_number:
         data = fetch_ad_data(ad_number)
 
     if data:
-        # Attach AD number so it also shows in the PDF report
+        # Attach AD number so it shows in the PDF report
         data["ad_number"] = ad_number
 
         st.success(f"✅ Found: {data['title']}")
@@ -436,7 +443,7 @@ if ad_number:
             if st.button("Generate PDF"):
                 try:
                     pdf_bytes = build_pdf_report(
-                        ad_data=data,  # includes ad_number we added above
+                        ad_data=data,                  # includes ad_number
                         details=details,
                         records=st.session_state["compliance_records"],
                         logo_url=LOGO_URL,
@@ -453,7 +460,7 @@ if ad_number:
         else:
             st.warning(
                 "PDF generation requires the 'reportlab' package. "
-                "Add `reportlab` to your requirements.txt (or `pip install reportlab`)."
+                "Add `reportlab` to your requirements.txt (and `Pillow` for grayscale logo)."
             )
 
     else:
