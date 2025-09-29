@@ -15,7 +15,6 @@ try:
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import mm
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
-    from reportlab.lib.utils import ImageReader
     REPORTLAB_AVAILABLE = True
 except Exception:
     REPORTLAB_AVAILABLE = False
@@ -119,34 +118,32 @@ def extract_details_from_html(html_url: str):
 def build_pdf_report(ad_data: dict, details: dict, records: list, logo_url: str, site_url: str) -> bytes:
     """
     Build a PDF summarizing the AD search result, extracted sections, and compliance records.
-    Logo is converted to grayscale and resized to 30% above the website link.
+    PDF-only: logo is converted to grayscale and resized to ~30%, placed above the website link.
     """
     if not REPORTLAB_AVAILABLE:
         raise RuntimeError("ReportLab is not installed. Add 'reportlab' to your requirements.txt.")
 
-    # Try to process logo (grayscale + 30% size) for the PDF only
-    logo_reader_processed = None
+    # Prepare grayscale 30% logo (pass BytesIO to ReportLab Image to avoid ImageReader error)
+    logo_flowable = None
     try:
         from PIL import Image as PILImage
         resp = requests.get(logo_url, timeout=10)
         resp.raise_for_status()
         pil_img = PILImage.open(io.BytesIO(resp.content)).convert("L")  # grayscale
         w, h = pil_img.size
-        new_size = (max(1, int(w * 0.3)), max(1, int(h * 0.3)))        # 30% scale
-        pil_img = pil_img.resize(new_size, PILImage.LANCZOS)
-        # Keep as grayscale; ReportLab supports 'L'. Save to buffer.
+        pil_img = pil_img.resize((max(1, int(w * 0.3)), max(1, int(h * 0.3))), PILImage.LANCZOS)  # 30%
         logo_buf = io.BytesIO()
         pil_img.save(logo_buf, format="PNG")
         logo_buf.seek(0)
-        logo_reader_processed = ImageReader(logo_buf)
+        logo_flowable = Image(logo_buf)  # let ReportLab infer dimensions
     except Exception:
-        # Fall back: use original logo as-is (color, default size inference)
+        # Fallback: original logo bytes with a reasonable width
         try:
             resp = requests.get(logo_url, timeout=10)
             resp.raise_for_status()
-            logo_reader_processed = ImageReader(io.BytesIO(resp.content))
+            logo_flowable = Image(io.BytesIO(resp.content), width=40*mm)
         except Exception:
-            logo_reader_processed = None
+            logo_flowable = None
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -169,10 +166,9 @@ def build_pdf_report(ad_data: dict, details: dict, records: list, logo_url: str,
 
     story = []
 
-    # --- Grayscale, 30% logo above website link (PDF only) ---
-    if logo_reader_processed:
-        # let ReportLab infer dimensions from the processed bitmap (already 30%)
-        story.append(Image(logo_reader_processed))
+    # Grayscale logo above website
+    if logo_flowable:
+        story.append(logo_flowable)
 
     # Website link
     story.append(Paragraph(f'<font size="12"><a href="{site_url}">{site_url}</a></font>', small))
