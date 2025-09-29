@@ -38,9 +38,12 @@ if "compliance_records" not in st.session_state:
     st.session_state["compliance_records"] = []
 
 # -----------------------------
-# Input
+# Inputs
 # -----------------------------
 ad_number = st.text_input("Enter AD Number (e.g., 2020-06-14):").strip()
+
+# NEW: Customer for report (manual input)
+customer_for_report = st.text_input("Customer (for report):").strip()
 
 # -----------------------------
 # Data fetchers
@@ -115,15 +118,24 @@ def extract_details_from_html(html_url: str):
 # -----------------------------
 # PDF report builder
 # -----------------------------
-def build_pdf_report(ad_data: dict, details: dict, records: list, logo_url: str, site_url: str) -> bytes:
+def build_pdf_report(
+    ad_data: dict,
+    details: dict,
+    records: list,
+    logo_url: str,
+    site_url: str,
+    customer: str,
+    aircraft: str
+) -> bytes:
     """
     Build a PDF summarizing the AD search result, extracted sections, and compliance records.
     PDF-only: logo is converted to grayscale and resized to ~30%, placed above the website link.
+    Replaces 'HTML' and 'PDF' with 'Customer' and 'Aircraft' in the metadata.
     """
     if not REPORTLAB_AVAILABLE:
         raise RuntimeError("ReportLab is not installed. Add 'reportlab' to your requirements.txt.")
 
-    # Prepare grayscale 30% logo (pass BytesIO to ReportLab Image to avoid ImageReader error)
+    # Prepare grayscale 30% logo (pass BytesIO to ReportLab Image)
     logo_flowable = None
     try:
         from PIL import Image as PILImage
@@ -184,13 +196,13 @@ def build_pdf_report(ad_data: dict, details: dict, records: list, logo_url: str,
     # AD Metadata
     story.append(Paragraph("Airworthiness Directive", h2))
     meta_data = [
-        ["AD Number", ad_data.get("ad_number") or ""],   # AD Number above Document Number
+        ["AD Number", ad_data.get("ad_number") or ""],
         ["Document Number", ad_data.get("document_number") or ""],
         ["AD Title", ad_data.get("title") or ""],
         ["Publication Date", ad_data.get("publication_date") or "N/A"],
         ["Effective Date", ad_data.get("effective_date") or "N/A"],
-        ["HTML", ad_data.get("html_url") or ""],
-        ["PDF", ad_data.get("pdf_url") or ""],
+        ["Customer", customer or ""],         # <-- replaced 'HTML'
+        ["Aircraft", aircraft or ""],         # <-- replaced 'PDF' (from Serials/MSN/PNs)
     ]
     meta_table = Table(meta_data, colWidths=[40*mm, 120*mm], hAlign="LEFT")
     meta_table.setStyle(TableStyle([
@@ -438,12 +450,19 @@ if ad_number:
         if REPORTLAB_AVAILABLE:
             if st.button("Generate PDF"):
                 try:
+                    # Pull Aircraft from the most recent "Serials / MSN / PNs"
+                    aircraft_for_report = ""
+                    if st.session_state["compliance_records"]:
+                        aircraft_for_report = st.session_state["compliance_records"][-1].get("applic_serials", "") or ""
+
                     pdf_bytes = build_pdf_report(
                         ad_data=data,                  # includes ad_number
                         details=details,
                         records=st.session_state["compliance_records"],
                         logo_url=LOGO_URL,
-                        site_url=SITE_URL
+                        site_url=SITE_URL,
+                        customer=customer_for_report,
+                        aircraft=aircraft_for_report
                     )
                     st.download_button(
                         "Download AD Report (PDF)",
