@@ -7,6 +7,7 @@ import json
 import io
 import csv
 from datetime import datetime
+from PIL import Image as PILImage  # for logo resize + grayscale
 
 # --- PDF (ReportLab) imports ---
 try:
@@ -28,8 +29,20 @@ st.set_page_config(page_title="FAA AD Compliance Checker", layout="centered")
 LOGO_URL = "https://www.ferasaviation.info/gallery/FA__logo.png?ts=1754692591"
 SITE_URL = "https://www.ferasaviation.info"
 
-# Logo + Website
-st.image(LOGO_URL, width=180)
+# Fetch logo, resize to 30%, convert to grayscale (UI only)
+try:
+    r_logo = requests.get(LOGO_URL, timeout=10)
+    r_logo.raise_for_status()
+    img_data = PILImage.open(io.BytesIO(r_logo.content))
+    w, h = img_data.size
+    new_size = (max(1, int(w * 0.3)), max(1, int(h * 0.3)))  # 30% scale, guard against 0
+    img_bw = img_data.convert("L").resize(new_size)
+    st.image(img_bw)
+except Exception:
+    # Fallback to a fixed-width original if processing fails
+    st.image(LOGO_URL, width=180)
+
+# Website under logo (clickable)
 st.markdown(f"[🌐 www.ferasaviation.info]({SITE_URL})")
 
 st.title("🛠️ AD Compliance Checker")
@@ -114,7 +127,7 @@ def extract_details_from_html(html_url: str):
         }
 
 # -----------------------------
-# PDF report builder
+# PDF report builder (PDF uses colored original logo)
 # -----------------------------
 def build_pdf_report(ad_data: dict, details: dict, records: list, logo_url: str, site_url: str) -> bytes:
     """
@@ -145,7 +158,7 @@ def build_pdf_report(ad_data: dict, details: dict, records: list, logo_url: str,
 
     story = []
 
-    # Header with Logo + site
+    # Header with Logo + site (keep original colored logo for PDF)
     try:
         resp = requests.get(logo_url, timeout=10)
         resp.raise_for_status()
@@ -165,10 +178,10 @@ def build_pdf_report(ad_data: dict, details: dict, records: list, logo_url: str,
     story.append(Paragraph(f"Generated: {generated_ts}", small))
     story.append(Spacer(1, 12))
 
-    # AD Metadata
+    # AD Metadata (AD Number added above Document Number)
     story.append(Paragraph("Airworthiness Directive", h2))
     meta_data = [
-        ["AD Number", ad_data.get("ad_number") or ""],   # AD Number shown ABOVE Document Number
+        ["AD Number", ad_data.get("ad_number") or ""],
         ["Document Number", ad_data.get("document_number") or ""],
         ["AD Title", ad_data.get("title") or ""],
         ["Publication Date", ad_data.get("publication_date") or "N/A"],
@@ -269,7 +282,7 @@ if ad_number:
         data = fetch_ad_data(ad_number)
 
     if data:
-        # Attach AD number so it shows in the PDF report
+        # Attach AD number so it also shows in the PDF report
         data["ad_number"] = ad_number
 
         st.success(f"✅ Found: {data['title']}")
