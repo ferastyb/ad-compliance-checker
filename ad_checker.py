@@ -119,12 +119,12 @@ def extract_details_from_html(html_url: str):
 def build_pdf_report(ad_data: dict, details: dict, records: list, logo_url: str, site_url: str) -> bytes:
     """
     Build a PDF summarizing the AD search result, extracted sections, and compliance records.
-    Logo is converted to grayscale and resized to 60% above the website link.
+    Logo is converted to grayscale and resized to 30% above the website link.
     """
     if not REPORTLAB_AVAILABLE:
         raise RuntimeError("ReportLab is not installed. Add 'reportlab' to your requirements.txt.")
 
-    # Try to process logo (grayscale + 60% size) for the PDF only
+    # Try to process logo (grayscale + 30% size) for the PDF only
     logo_reader_processed = None
     try:
         from PIL import Image as PILImage
@@ -132,7 +132,7 @@ def build_pdf_report(ad_data: dict, details: dict, records: list, logo_url: str,
         resp.raise_for_status()
         pil_img = PILImage.open(io.BytesIO(resp.content)).convert("L")  # grayscale
         w, h = pil_img.size
-        new_size = (max(1, int(w * 0.3)), max(1, int(h * 0.3)))        # 60% scale
+        new_size = (max(1, int(w * 0.3)), max(1, int(h * 0.3)))        # 30% scale
         pil_img = pil_img.resize(new_size, PILImage.LANCZOS)
         # Keep as grayscale; ReportLab supports 'L'. Save to buffer.
         logo_buf = io.BytesIO()
@@ -169,9 +169,9 @@ def build_pdf_report(ad_data: dict, details: dict, records: list, logo_url: str,
 
     story = []
 
-    # --- Grayscale, 60% logo above website link (PDF only) ---
+    # --- Grayscale, 30% logo above website link (PDF only) ---
     if logo_reader_processed:
-        # let ReportLab infer dimensions from the processed bitmap (already 60%)
+        # let ReportLab infer dimensions from the processed bitmap (already 30%)
         story.append(Image(logo_reader_processed))
 
     # Website link
