@@ -28,12 +28,11 @@ st.set_page_config(page_title="FAA AD Compliance Checker", layout="centered")
 LOGO_URL = "https://www.ferasaviation.info/gallery/FA__logo.png?ts=1754692591"
 SITE_URL = "https://www.ferasaviation.info"
 
-# Logo
+# Logo + Website
 st.image(LOGO_URL, width=180)
-# Website under logo (clickable)
-st.markdown(f"[🌐 www.ferasaviation.info]({SITE_URL})")
+st.markdown(f"[www.ferasaviation.info]({SITE_URL})")
 
-st.title("🛠️ AD Compliance Checker")
+st.title("AD Compliance Checker")
 
 # Session state for compliance entries
 if "compliance_records" not in st.session_state:
@@ -70,7 +69,7 @@ def fetch_ad_data(ad_number: str):
                     "html_url": doc.get("html_url"),
                     "pdf_url": doc.get("pdf_url"),
                     "document_number": doc.get("document_number"),
-                    "publication_date": doc.get("publication_date")
+                    "publication_date": doc.get("publication_date"),
                 }
 
     except requests.RequestException as e:
@@ -117,10 +116,10 @@ def extract_details_from_html(html_url: str):
 # -----------------------------
 # PDF report builder
 # -----------------------------
-def build_pdf_report(ad_data: dict, details: dict, records: list, logo_url: str, site_url: str) -> bytes:
+def build_pdf_report(ad_data: dict, details: dict, records: list, logo_url: str, site_url: str, ad_number: str) -> bytes:
     """
     Build a PDF summarizing the AD search result, extracted sections, and compliance records.
-    Returns bytes ready for download.
+    Includes the AD Number entered by the user.
     """
     if not REPORTLAB_AVAILABLE:
         raise RuntimeError("ReportLab is not installed. Add 'reportlab' to your requirements.txt.")
@@ -133,7 +132,7 @@ def build_pdf_report(ad_data: dict, details: dict, records: list, logo_url: str,
         rightMargin=16*mm,
         topMargin=16*mm,
         bottomMargin=16*mm,
-        title=f"AD Report - {ad_data.get('document_number') or 'Unknown'}",
+        title=f"AD Report - {ad_data.get('document_number') or ad_number or 'Unknown'}",
         author="Feras Aviation AD Compliance Checker",
     )
 
@@ -151,10 +150,9 @@ def build_pdf_report(ad_data: dict, details: dict, records: list, logo_url: str,
         resp = requests.get(logo_url, timeout=10)
         resp.raise_for_status()
         logo_reader = ImageReader(io.BytesIO(resp.content))
-        img = Image(logo_reader, width=40*mm, height=14*mm)  # adjust height/width as needed
+        img = Image(logo_reader, width=40*mm, height=14*mm)
         story.append(img)
     except Exception:
-        # silently continue without logo
         pass
 
     story.append(Paragraph(f'<font size="12"><a href="{site_url}">{site_url}</a></font>', small))
@@ -167,9 +165,10 @@ def build_pdf_report(ad_data: dict, details: dict, records: list, logo_url: str,
     story.append(Paragraph(f"Generated: {generated_ts}", small))
     story.append(Spacer(1, 12))
 
-    # AD Metadata
+    # AD Metadata (includes AD Number entered by user)
     story.append(Paragraph("Airworthiness Directive", h2))
     meta_data = [
+        ["AD Number (Entered)", ad_number],
         ["AD Title", ad_data.get("title") or ""],
         ["Document Number", ad_data.get("document_number") or ""],
         ["Publication Date", ad_data.get("publication_date") or "N/A"],
@@ -177,7 +176,7 @@ def build_pdf_report(ad_data: dict, details: dict, records: list, logo_url: str,
         ["HTML", ad_data.get("html_url") or ""],
         ["PDF", ad_data.get("pdf_url") or ""],
     ]
-    meta_table = Table(meta_data, colWidths=[40*mm, 120*mm], hAlign="LEFT")
+    meta_table = Table(meta_data, colWidths=[45*mm, 115*mm], hAlign="LEFT")
     meta_table.setStyle(TableStyle([
         ("BOX", (0,0), (-1,-1), 0.5, colors.grey),
         ("INNERGRID", (0,0), (-1,-1), 0.25, colors.grey),
@@ -210,7 +209,6 @@ def build_pdf_report(ad_data: dict, details: dict, records: list, logo_url: str,
     if not records:
         story.append(Paragraph("No compliance records added.", normal))
     else:
-        # Build a table, one row per record
         header = [
             "Status", "Method", "Details",
             "Applicability (Aircraft/Component)", "Serials",
@@ -223,9 +221,11 @@ def build_pdf_report(ad_data: dict, details: dict, records: list, logo_url: str,
                 nd_hours = next_due.get("hours")
                 nd_cycles = next_due.get("cycles")
                 nd_cal = next_due.get("calendar")
-                nd_text = ", ".join([str(x) for x in [f"H:{nd_hours}" if nd_hours is not None else None,
-                                                     f"C:{nd_cycles}" if nd_cycles is not None else None,
-                                                     nd_cal] if x])
+                nd_text = ", ".join([str(x) for x in [
+                    f"H:{nd_hours}" if nd_hours is not None else None,
+                    f"C:{nd_cycles}" if nd_cycles is not None else None,
+                    nd_cal
+                ] if x])
             else:
                 nd_text = str(next_due)
 
@@ -239,7 +239,8 @@ def build_pdf_report(ad_data: dict, details: dict, records: list, logo_url: str,
                 str(rec.get("performed_hours", "")),
                 str(rec.get("performed_cycles", "")),
                 "Yes" if rec.get("repetitive") else "No",
-                (f"{rec.get('rep_interval_value','')} {rec.get('rep_interval_unit','')}".strip() if rec.get("repetitive") else ""),
+                (f"{rec.get('rep_interval_value','')} {rec.get('rep_interval_unit','')}".strip()
+                 if rec.get("repetitive") else ""),
                 (rec.get("rep_basis","") if rec.get("repetitive") else ""),
                 nd_text,
             ])
@@ -273,6 +274,9 @@ if ad_number:
         data = fetch_ad_data(ad_number)
 
     if data:
+        # Show AD Number (entered) in the UI
+        st.write(f"**AD Number (entered):** {ad_number}")
+
         st.success(f"✅ Found: {data['title']}")
         st.write(f"**Document Number:** {data['document_number']}")
         st.write(f"**Publication Date:** {data.get('publication_date') or 'N/A'}")
@@ -427,12 +431,13 @@ if ad_number:
                         details=details,
                         records=st.session_state["compliance_records"],
                         logo_url=LOGO_URL,
-                        site_url=SITE_URL
+                        site_url=SITE_URL,
+                        ad_number=ad_number,  # <-- include the entered AD number
                     )
                     st.download_button(
                         "Download AD Report (PDF)",
                         data=pdf_bytes,
-                        file_name=f"AD_Report_{data.get('document_number','AD')}.pdf",
+                        file_name=f"AD_Report_{ad_number or data.get('document_number','AD')}.pdf",
                         mime="application/pdf",
                     )
                 except Exception as e:
