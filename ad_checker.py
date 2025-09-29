@@ -3,23 +3,25 @@
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
-import re
 import json
 import io
 import csv
 
 # -----------------------------
-# Page setup + Logo
+# Page setup + Branding
 # -----------------------------
 st.set_page_config(page_title="FAA AD Compliance Checker", layout="centered")
 
-# Logo (adjust width as you like)
+# Logo
 st.image(
     "https://www.ferasaviation.info/gallery/FA__logo.png?ts=1754692591",
     width=180,
 )
 
-st.title("AD Compliance Checker")
+# Website under logo (clickable)
+st.markdown("[🌐 www.ferasaviation.info](https://www.ferasaviation.info)")
+
+st.title("🛠️ AD Compliance Checker")
 
 # Session state for compliance entries
 if "compliance_records" not in st.session_state:
@@ -33,7 +35,7 @@ ad_number = st.text_input("Enter AD Number (e.g., 2020-06-14):").strip()
 # -----------------------------
 # Data fetchers
 # -----------------------------
-def fetch_ad_data(ad_number):
+def fetch_ad_data(ad_number: str):
     base_url = "https://www.federalregister.gov/api/v1/documents.json"
     headers = {"User-Agent": "Mozilla/5.0"}
 
@@ -64,14 +66,14 @@ def fetch_ad_data(ad_number):
     return None
 
 
-def extract_details_from_html(html_url):
+def extract_details_from_html(html_url: str):
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(html_url, headers=headers, timeout=10)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
 
-        def find_section_text(keyword):
+        def find_section_text(keyword: str):
             candidates = soup.find_all(["strong", "h4", "h3", "h2"])
             for tag in candidates:
                 if tag.get_text(strip=True).lower().startswith(keyword.lower()):
@@ -153,7 +155,7 @@ if ad_number:
                 )
                 method_other = st.text_input("If Other/Details (doc refs, SB #, AMM task, etc.)")
             with col2:
-                perf_date = st.date_input("Compliance Date", value=None)
+                perf_date = st.date_input("Compliance Date")
                 perf_hours = st.number_input("Aircraft Hours at Compliance", min_value=0, step=1, value=0)
                 perf_cycles = st.number_input("Aircraft Cycles at Compliance", min_value=0, step=1, value=0)
 
@@ -245,7 +247,7 @@ if ad_number:
             st.download_button(
                 "Download Compliance CSV",
                 data=buf.getvalue().encode("utf-8"),
-                file_name=f"compliance_{data['document_number']}.csv",
+                file_name=f"compliance_{st.session_state.compliance_records[-1]['document_number'] if st.session_state.compliance_records else 'ad'}.csv",
                 mime="text/csv",
             )
 
