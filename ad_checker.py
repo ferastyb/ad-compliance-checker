@@ -19,9 +19,9 @@ st.image(
 )
 
 # Website under logo (clickable)
-st.markdown("[🌐 www.ferasaviation.info](https://www.ferasaviation.info)")
+st.markdown("[www.ferasaviation.info](https://www.ferasaviation.info)")
 
-st.title("🛠️ AD Compliance Checker")
+st.title("AD Compliance Checker")
 
 # Session state for compliance entries
 if "compliance_records" not in st.session_state:
