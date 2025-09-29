@@ -5,6 +5,10 @@ from bs4 import BeautifulSoup
 st.set_page_config(page_title=" FAA AD Compliance Checker", layout="centered")
 st.title("🛠️ AD Compliance Checker")
 
+# --- Session state for compliance entries ---
+if "compliance_records" not in st.session_state:
+    st.session_state["compliance_records"] = []
+
 ad_number = st.text_input("Enter AD Number (e.g., 2020-06-14):").strip()
 
 def fetch_ad_data(ad_number):
@@ -94,6 +98,110 @@ if ad_number:
 
         st.subheader("📅 Compliance Deadlines")
         st.write(details['compliance_times'])
+
+        # ==============================
+        # Compliance Recording Section
+        # ==============================
+        st.divider()
+        st.subheader("✅ Compliance Status for this AD")
+
+        with st.form("compliance_form"):
+            col1, col2 = st.columns(2)
+            with col1:
+                status = st.selectbox(
+                    "Compliance Status",
+                    ["Not Evaluated", "Not Applicable", "Compliant", "Partial", "Non-Compliant"],
+                    index=0,
+                )
+                method = st.multiselect(
+                    "Method of Compliance",
+                    ["Service Bulletin", "AMM Task", "STC/Mod", "DER-approved Repair", "Alternative Method of Compliance (AMOC)", "Other"],
+                )
+                method_other = st.text_input("If Other/Details (doc refs, SB #, AMM task, etc.)")
+            with col2:
+                perf_date = st.date_input("Compliance Date", value=None)
+                perf_hours = st.number_input("Aircraft Hours at Compliance", min_value=0, step=1, value=0)
+                perf_cycles = st.number_input("Aircraft Cycles at Compliance", min_value=0, step=1, value=0)
+
+            st.markdown("**Applicability (aircraft/engine/component/serials)**")
+            applic_aircraft = st.text_input("Aircraft / Model / Component", value="")
+            applic_serials = st.text_input("Serials / MSN / PNs", value="")
+
+            st.markdown("**Repetitive Requirements (optional)**")
+            rep = st.checkbox("This AD has repetitive requirements")
+            rep_col1, rep_col2, rep_col3 = st.columns(3)
+            with rep_col1:
+                rep_interval_value = st.number_input("Interval value", min_value=0, step=1, value=0, disabled=not rep)
+            with rep_col2:
+                rep_interval_unit = st.selectbox("Interval unit", ["hours", "cycles", "days", "months", "years"], disabled=not rep)
+            with rep_col3:
+                rep_basis = st.selectbox("Interval basis", ["since last compliance", "since effective date", "calendar"], disabled=not rep)
+
+            submitted = st.form_submit_button("Add Compliance Entry")
+
+        if submitted:
+            record = {
+                "ad_number": ad_number,
+                "document_number": data.get("document_number"),
+                "status": status,
+                "method": method,
+                "method_other": method_other,
+                "applic_aircraft": applic_aircraft,
+                "applic_serials": applic_serials,
+                "performed_date": str(perf_date) if perf_date else None,
+                "performed_hours": int(perf_hours) if perf_hours is not None else None,
+                "performed_cycles": int(perf_cycles) if perf_cycles is not None else None,
+                "repetitive": rep,
+                "rep_interval_value": int(rep_interval_value) if rep else None,
+                "rep_interval_unit": rep_interval_unit if rep else None,
+                "rep_basis": rep_basis if rep else None,
+            }
+            # Compute a simple "Next Due" field based on the unit (hours/cycles only here; calendar can be inferred outside)
+            next_due = {}
+            if rep:
+                if rep_interval_unit == "hours" and record.get("performed_hours") is not None:
+                    next_due["hours"] = record["performed_hours"] + record["rep_interval_value"]
+                if rep_interval_unit == "cycles" and record.get("performed_cycles") is not None:
+                    next_due["cycles"] = record["performed_cycles"] + record["rep_interval_value"]
+                # For calendar units we store the definition; exact next date may require fleet utilization
+                if rep_interval_unit in {"days", "months", "years"}:
+                    next_due["calendar"] = f"+{record['rep_interval_value']} {record['rep_interval_unit']} ({record['rep_basis']})"
+            record["next_due"] = next_due or None
+
+            st.session_state.compliance_records.append(record)
+            st.success("Compliance entry added.")
+
+        # Show recorded entries
+        if st.session_state.compliance_records:
+            st.subheader("🗂️ Recorded Compliance Entries")
+            for idx, rec in enumerate(st.session_state.compliance_records, start=1):
+                st.markdown(f"**Entry {idx}** — Status: {rec['status']}")
+                st.write({k: v for k, v in rec.items() if k not in ("ad_number",)})
+
+            # Offer export of entries
+            import json, io, csv
+            buf = io.StringIO()
+            writer = csv.writer(buf)
+            writer.writerow(["ad_number","document_number","status","method","method_other","applic_aircraft","applic_serials","performed_date","performed_hours","performed_cycles","repetitive","rep_interval_value","rep_interval_unit","rep_basis","next_due"])
+            for rec in st.session_state.compliance_records:
+                writer.writerow([
+                    rec.get("ad_number"),
+                    rec.get("document_number"),
+                    rec.get("status"),
+                    "; ".join(rec.get("method", [])),
+                    rec.get("method_other"),
+                    rec.get("applic_aircraft"),
+                    rec.get("applic_serials"),
+                    rec.get("performed_date"),
+                    rec.get("performed_hours"),
+                    rec.get("performed_cycles"),
+                    rec.get("repetitive"),
+                    rec.get("rep_interval_value"),
+                    rec.get("rep_interval_unit"),
+                    rec.get("rep_basis"),
+                    json.dumps(rec.get("next_due")),
+                ])
+            st.download_button("Download Compliance CSV", data=buf.getvalue().encode("utf-8"), file_name=f"compliance_{data['document_number']}.csv", mime="text/csv")
 
     else:
         st.error("❌ AD not found. Please check the number exactly as it appears (e.g., 2020-06-14).")
