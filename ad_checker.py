@@ -19,7 +19,7 @@ st.image(
     width=180,
 )
 
-st.title("🛠️ AD Compliance Checker")
+st.title("AD Compliance Checker")
 
 # Session state for compliance entries
 if "compliance_records" not in st.session_state:
