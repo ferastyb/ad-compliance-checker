@@ -6,22 +6,34 @@ from bs4 import BeautifulSoup
 import json
 import io
 import csv
+from datetime import datetime
+
+# --- PDF (ReportLab) imports ---
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
+    from reportlab.lib.utils import ImageReader
+    REPORTLAB_AVAILABLE = True
+except Exception:
+    REPORTLAB_AVAILABLE = False
 
 # -----------------------------
 # Page setup + Branding
 # -----------------------------
 st.set_page_config(page_title="FAA AD Compliance Checker", layout="centered")
 
+LOGO_URL = "https://www.ferasaviation.info/gallery/FA__logo.png?ts=1754692591"
+SITE_URL = "https://www.ferasaviation.info"
+
 # Logo
-st.image(
-    "https://www.ferasaviation.info/gallery/FA__logo.png?ts=1754692591",
-    width=180,
-)
-
+st.image(LOGO_URL, width=180)
 # Website under logo (clickable)
-st.markdown("[www.ferasaviation.info](https://www.ferasaviation.info)")
+st.markdown(f"[🌐 www.ferasaviation.info]({SITE_URL})")
 
-st.title("AD Compliance Checker")
+st.title("🛠️ AD Compliance Checker")
 
 # Session state for compliance entries
 if "compliance_records" not in st.session_state:
@@ -57,7 +69,8 @@ def fetch_ad_data(ad_number: str):
                     "effective_date": doc.get("effective_on"),
                     "html_url": doc.get("html_url"),
                     "pdf_url": doc.get("pdf_url"),
-                    "document_number": doc.get("document_number")
+                    "document_number": doc.get("document_number"),
+                    "publication_date": doc.get("publication_date")
                 }
 
     except requests.RequestException as e:
@@ -101,6 +114,156 @@ def extract_details_from_html(html_url: str):
             "compliance_times": "N/A"
         }
 
+# -----------------------------
+# PDF report builder
+# -----------------------------
+def build_pdf_report(ad_data: dict, details: dict, records: list, logo_url: str, site_url: str) -> bytes:
+    """
+    Build a PDF summarizing the AD search result, extracted sections, and compliance records.
+    Returns bytes ready for download.
+    """
+    if not REPORTLAB_AVAILABLE:
+        raise RuntimeError("ReportLab is not installed. Add 'reportlab' to your requirements.txt.")
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        leftMargin=16*mm,
+        rightMargin=16*mm,
+        topMargin=16*mm,
+        bottomMargin=16*mm,
+        title=f"AD Report - {ad_data.get('document_number') or 'Unknown'}",
+        author="Feras Aviation AD Compliance Checker",
+    )
+
+    styles = getSampleStyleSheet()
+    h1 = styles["Heading1"]
+    h2 = styles["Heading2"]
+    h3 = styles["Heading3"]
+    normal = styles["BodyText"]
+    small = ParagraphStyle("small", parent=normal, fontSize=9, leading=12, textColor=colors.grey)
+
+    story = []
+
+    # Header with Logo + site
+    try:
+        resp = requests.get(logo_url, timeout=10)
+        resp.raise_for_status()
+        logo_reader = ImageReader(io.BytesIO(resp.content))
+        img = Image(logo_reader, width=40*mm, height=14*mm)  # adjust height/width as needed
+        story.append(img)
+    except Exception:
+        # silently continue without logo
+        pass
+
+    story.append(Paragraph(f'<font size="12"><a href="{site_url}">{site_url}</a></font>', small))
+    story.append(Spacer(1, 6))
+
+    # Title
+    story.append(Paragraph("AD Compliance Report", h1))
+    story.append(Spacer(1, 6))
+    generated_ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    story.append(Paragraph(f"Generated: {generated_ts}", small))
+    story.append(Spacer(1, 12))
+
+    # AD Metadata
+    story.append(Paragraph("Airworthiness Directive", h2))
+    meta_data = [
+        ["AD Title", ad_data.get("title") or ""],
+        ["Document Number", ad_data.get("document_number") or ""],
+        ["Publication Date", ad_data.get("publication_date") or "N/A"],
+        ["Effective Date", ad_data.get("effective_date") or "N/A"],
+        ["HTML", ad_data.get("html_url") or ""],
+        ["PDF", ad_data.get("pdf_url") or ""],
+    ]
+    meta_table = Table(meta_data, colWidths=[40*mm, 120*mm], hAlign="LEFT")
+    meta_table.setStyle(TableStyle([
+        ("BOX", (0,0), (-1,-1), 0.5, colors.grey),
+        ("INNERGRID", (0,0), (-1,-1), 0.25, colors.grey),
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("BACKGROUND", (0,0), (0,-1), colors.whitesmoke),
+        ("LEFTPADDING", (0,0), (-1,-1), 4),
+        ("RIGHTPADDING", (0,0), (-1,-1), 4),
+        ("TOPPADDING", (0,0), (-1,-1), 3),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+    ]))
+    story.append(meta_table)
+    story.append(Spacer(1, 12))
+
+    # Extracted Sections
+    story.append(Paragraph("Extracted Details", h2))
+    for section_title, key in [
+        ("Applicability / Affected Aircraft", "affected_aircraft"),
+        ("Required Actions", "required_actions"),
+        ("Compliance Deadlines", "compliance_times"),
+    ]:
+        story.append(Paragraph(section_title, h3))
+        text = (details.get(key) or "").replace("\n", "<br/>")
+        if not text.strip():
+            text = "N/A"
+        story.append(Paragraph(text, normal))
+        story.append(Spacer(1, 8))
+
+    # Compliance Records
+    story.append(Paragraph("Compliance Records", h2))
+    if not records:
+        story.append(Paragraph("No compliance records added.", normal))
+    else:
+        # Build a table, one row per record
+        header = [
+            "Status", "Method", "Details",
+            "Applicability (Aircraft/Component)", "Serials",
+            "Date", "Hours", "Cycles", "Repetitive", "Interval", "Basis", "Next Due"
+        ]
+        rows = [header]
+        for rec in records:
+            next_due = rec.get("next_due") or {}
+            if isinstance(next_due, dict):
+                nd_hours = next_due.get("hours")
+                nd_cycles = next_due.get("cycles")
+                nd_cal = next_due.get("calendar")
+                nd_text = ", ".join([str(x) for x in [f"H:{nd_hours}" if nd_hours is not None else None,
+                                                     f"C:{nd_cycles}" if nd_cycles is not None else None,
+                                                     nd_cal] if x])
+            else:
+                nd_text = str(next_due)
+
+            rows.append([
+                rec.get("status", ""),
+                "; ".join(rec.get("method", []) or []),
+                rec.get("method_other", ""),
+                rec.get("applic_aircraft", ""),
+                rec.get("applic_serials", ""),
+                rec.get("performed_date", ""),
+                str(rec.get("performed_hours", "")),
+                str(rec.get("performed_cycles", "")),
+                "Yes" if rec.get("repetitive") else "No",
+                (f"{rec.get('rep_interval_value','')} {rec.get('rep_interval_unit','')}".strip() if rec.get("repetitive") else ""),
+                (rec.get("rep_basis","") if rec.get("repetitive") else ""),
+                nd_text,
+            ])
+
+        widths = [18*mm, 25*mm, 28*mm, 30*mm, 28*mm, 18*mm, 14*mm, 14*mm, 16*mm, 20*mm, 20*mm, 26*mm]
+        table = Table(rows, colWidths=widths, repeatRows=1)
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.lightgrey),
+            ("TEXTCOLOR", (0,0), (-1,0), colors.black),
+            ("ALIGN", (0,0), (-1,0), "CENTER"),
+            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+            ("FONTSIZE", (0,0), (-1,-1), 9),
+            ("BOX", (0,0), (-1,-1), 0.5, colors.grey),
+            ("INNERGRID", (0,0), (-1,-1), 0.25, colors.grey),
+            ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ]))
+        story.append(table)
+
+    story.append(Spacer(1, 12))
+    story.append(Paragraph("Generated by Feras Aviation AD Compliance Checker", small))
+
+    doc.build(story)
+    buf.seek(0)
+    return buf.getvalue()
 
 # -----------------------------
 # Main flow
@@ -112,6 +275,7 @@ if ad_number:
     if data:
         st.success(f"✅ Found: {data['title']}")
         st.write(f"**Document Number:** {data['document_number']}")
+        st.write(f"**Publication Date:** {data.get('publication_date') or 'N/A'}")
         st.write(f"**Effective Date:** {data['effective_date'] or 'N/A'}")
         st.markdown(f"[🔗 View Full AD (HTML)]({data['html_url']})")
         st.markdown(f"[📄 View PDF]({data['pdf_url']})")
@@ -208,17 +372,16 @@ if ad_number:
                     next_due["calendar"] = f"+{record['rep_interval_value']} {record['rep_interval_unit']} ({record['rep_basis']})"
             record["next_due"] = next_due or None
 
-            st.session_state.compliance_records.append(record)
+            st.session_state["compliance_records"].append(record)
             st.success("Compliance entry added.")
 
-        # Show recorded entries
-        if st.session_state.compliance_records:
+        # Show recorded entries + CSV export
+        if st.session_state["compliance_records"]:
             st.subheader("🗂️ Recorded Compliance Entries")
-            for idx, rec in enumerate(st.session_state.compliance_records, start=1):
+            for idx, rec in enumerate(st.session_state["compliance_records"], start=1):
                 st.markdown(f"**Entry {idx}** — Status: {rec['status']}")
                 st.json({k: v for k, v in rec.items()})
 
-            # Offer export of entries
             buf = io.StringIO()
             writer = csv.writer(buf)
             writer.writerow([
@@ -226,12 +389,12 @@ if ad_number:
                 "applic_serials","performed_date","performed_hours","performed_cycles",
                 "repetitive","rep_interval_value","rep_interval_unit","rep_basis","next_due"
             ])
-            for rec in st.session_state.compliance_records:
+            for rec in st.session_state["compliance_records"]:
                 writer.writerow([
                     rec.get("ad_number"),
                     rec.get("document_number"),
                     rec.get("status"),
-                    "; ".join(rec.get("method", [])),
+                    "; ".join(rec.get("method", []) or []),
                     rec.get("method_other"),
                     rec.get("applic_aircraft"),
                     rec.get("applic_serials"),
@@ -247,8 +410,37 @@ if ad_number:
             st.download_button(
                 "Download Compliance CSV",
                 data=buf.getvalue().encode("utf-8"),
-                file_name=f"compliance_{st.session_state.compliance_records[-1]['document_number'] if st.session_state.compliance_records else 'ad'}.csv",
+                file_name=f"compliance_{data['document_number']}.csv",
                 mime="text/csv",
+            )
+
+        # -----------------------------
+        # PDF Report Download
+        # -----------------------------
+        st.divider()
+        st.subheader("📄 Generate PDF Report")
+        if REPORTLAB_AVAILABLE:
+            if st.button("Generate PDF"):
+                try:
+                    pdf_bytes = build_pdf_report(
+                        ad_data=data,
+                        details=details,
+                        records=st.session_state["compliance_records"],
+                        logo_url=LOGO_URL,
+                        site_url=SITE_URL
+                    )
+                    st.download_button(
+                        "Download AD Report (PDF)",
+                        data=pdf_bytes,
+                        file_name=f"AD_Report_{data.get('document_number','AD')}.pdf",
+                        mime="application/pdf",
+                    )
+                except Exception as e:
+                    st.error(f"Failed to create PDF: {e}")
+        else:
+            st.warning(
+                "PDF generation requires the 'reportlab' package. "
+                "Add `reportlab` to your requirements.txt (or `pip install reportlab`)."
             )
 
     else:
