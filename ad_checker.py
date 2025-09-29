@@ -29,7 +29,7 @@ st.set_page_config(page_title="FAA AD Compliance Checker", layout="centered")
 LOGO_URL = "https://www.ferasaviation.info/gallery/FA__logo.png?ts=1754692591"
 SITE_URL = "https://www.ferasaviation.info"
 
-# Fetch logo, resize to 30%, convert to grayscale (UI only)
+# Fetch logo, resize to 60%, convert to grayscale (UI only)
 try:
     r_logo = requests.get(LOGO_URL, timeout=10)
     r_logo.raise_for_status()
