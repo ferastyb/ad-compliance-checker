@@ -305,26 +305,26 @@ if ad_number:
         st.write(f"**Document Number:** {data['document_number']}")
         st.write(f"**Publication Date:** {data.get('publication_date') or 'N/A'}")
         st.write(f"**Effective Date:** {data['effective_date'] or 'N/A'}")
-        st.markdown(f"[🔗 View Full AD (HTML)]({data['html_url']})")
-        st.markdown(f"[📄 View PDF]({data['pdf_url']})")
+        st.markdown(f"[View Full AD (HTML)]({data['html_url']})")
+        st.markdown(f"[View PDF]({data['pdf_url']})")
 
-        with st.spinner("📄 Extracting AD details from HTML..."):
+        with st.spinner("Extracting AD details from HTML..."):
             details = extract_details_from_html(data['html_url'])
 
-        st.subheader("🛩️ Affected Aircraft / SB References")
+        st.subheader("Affected Aircraft / SB References")
         st.write(details['affected_aircraft'])
 
-        st.subheader("🔧 Required Actions")
+        st.subheader("Required Actions")
         st.write(details['required_actions'])
 
-        st.subheader("📅 Compliance Deadlines")
+        st.subheader("Compliance Deadlines")
         st.write(details['compliance_times'])
 
         # ==============================
         # Compliance Recording Section
         # ==============================
         st.divider()
-        st.subheader("✅ Compliance Status for this AD")
+        st.subheader("Compliance Status for this AD")
 
         with st.form("compliance_form"):
             col1, col2 = st.columns(2)
@@ -405,7 +405,7 @@ if ad_number:
 
         # Show recorded entries + CSV export
         if st.session_state["compliance_records"]:
-            st.subheader("🗂️ Recorded Compliance Entries")
+            st.subheader("Recorded Compliance Entries")
             for idx, rec in enumerate(st.session_state["compliance_records"], start=1):
                 st.markdown(f"**Entry {idx}** — Status: {rec['status']}")
                 st.json({k: v for k, v in rec.items()})
