@@ -41,7 +41,6 @@ if "compliance_records" not in st.session_state:
 # Inputs
 # -----------------------------
 ad_number = st.text_input("Enter AD Number (e.g., 2025-01-01):").strip()
-# Customer for report (manual input)
 customer_for_report = st.text_input("Customer (for report):").strip()
 
 # -----------------------------
@@ -58,7 +57,6 @@ EFFECTIVE_SENTENCE_RE = re.compile(
     r"(?:This\s*)?AD(?:\s+\d{4}-\d{2}-\d{2})?\s*(?:\([^)]*\))?\s*(?:is|becomes)\s*effective(?:\s+on)?\s*\(?\s*([A-Za-z]+ \d{1,2}, \d{4})\s*\)?",
     re.IGNORECASE | re.DOTALL
 )
-
 # Generic Month DD, YYYY capture (used in proximity fallback)
 MONTH_DATE_RE = re.compile(r"\b([A-Za-z]+ \d{1,2}, \d{4})\b")
 
@@ -71,27 +69,24 @@ def _normalize_date(date_str: str) -> str | None:
 def extract_effective_date_from_text(text: str) -> str | None:
     """
     1) Try robust regex for “AD ... is/becomes effective (on) Month DD, YYYY”.
-    2) Proximity fallback: find 'effective' then scan next ~120 chars for Month DD, YYYY.
+    2) Proximity fallback: find 'effective' then scan next ~180 chars for Month DD, YYYY.
     """
     if not text:
         return None
     t = text.replace("\u00a0", " ")
-    # 1) Direct sentence match
     m = EFFECTIVE_SENTENCE_RE.search(t)
     if m:
         norm = _normalize_date(m.group(1))
         if norm:
             return norm
-    # 2) Proximity fallback near 'effective'
     eff_idx = t.lower().find("effective")
     if eff_idx != -1:
-        window = t[eff_idx:eff_idx + 180]  # small window after the word 'effective'
+        window = t[eff_idx:eff_idx + 180]
         m2 = MONTH_DATE_RE.search(window)
         if m2:
             norm = _normalize_date(m2.group(1))
             if norm:
                 return norm
-    # Nothing found
     return None
 
 # -----------------------------
@@ -131,7 +126,7 @@ def fetch_ad_data(ad_number: str):
 
 
 def fetch_document_json(document_number: str) -> dict | None:
-    """Fetch the per-document JSON payload to scan API-provided text (e.g., body_html)."""
+    """Fetch the per-document JSON payload (contains 'dates', 'body_html_url', etc.)."""
     if not document_number:
         return None
     url = f"https://www.federalregister.gov/api/v1/documents/{document_number}.json"
@@ -144,17 +139,40 @@ def fetch_document_json(document_number: str) -> dict | None:
         return None
 
 
-def extract_effective_from_api_document(doc_json: dict, fallback_text: str | None = None) -> str | None:
+def extract_effective_from_api_document(doc_json: dict, html_fallback_text: str | None = None) -> str | None:
     """
-    Try to parse effective date from API fields such as body_html, abstract, excerpts,
-    or a caller-provided fallback text.
+    Try to parse the effective date from the per-document JSON:
+      1) 'dates' field (most reliable for the "DATES:" section)
+      2) fetch and parse 'body_html_url'
+      3) scan other text-y fields (abstract, excerpts, title)
+      4) use provided fallback text (from page HTML) as last resort
     """
     if not doc_json:
         doc_json = {}
 
-    # Potential string fields to scan:
+    # 1) DATES field often contains: "DATES: This AD is effective March 11, 2025."
+    dates_field = doc_json.get("dates")
+    if isinstance(dates_field, str) and dates_field.strip():
+        found = extract_effective_date_from_text(dates_field)
+        if found:
+            return found
+
+    # 2) body_html_url can be fetched and parsed
+    body_html_url = doc_json.get("body_html_url")
+    if body_html_url:
+        try:
+            r = requests.get(body_html_url, timeout=12)
+            r.raise_for_status()
+            text = BeautifulSoup(r.text, "html.parser").get_text(" ", strip=True)
+            found = extract_effective_date_from_text(text)
+            if found:
+                return found
+        except Exception:
+            pass
+
+    # 3) other candidates (abstract, excerpts, title)
     candidates = []
-    for key in ("body_html", "abstract", "comments_opening", "excerpts", "title"):
+    for key in ("abstract", "excerpts", "title"):
         val = doc_json.get(key)
         if isinstance(val, str) and val.strip():
             candidates.append(val)
@@ -167,8 +185,9 @@ def extract_effective_from_api_document(doc_json: dict, fallback_text: str | Non
         if found:
             return found
 
-    if fallback_text:
-        return extract_effective_date_from_text(fallback_text)
+    # 4) fallback from caller (page HTML)
+    if html_fallback_text:
+        return extract_effective_date_from_text(html_fallback_text)
 
     return None
 
@@ -396,25 +415,24 @@ if ad_number:
         st.markdown(f"[🔗 View Full AD (HTML)]({data['html_url']})")
         st.markdown(f"[📄 View PDF]({data['pdf_url']})")
 
-        # Try API document JSON for the explicit “... is effective ...” sentence
-        api_doc = fetch_document_json(data.get("document_number"))
-        api_text_effective = extract_effective_from_api_document(api_doc)
-
         with st.spinner("📄 Extracting AD details from HTML..."):
             details = extract_details_from_html(data['html_url'])
 
+        # Fetch per-document JSON (contains 'dates', 'body_html_url', etc.)
+        api_doc = fetch_document_json(data.get("document_number"))
+
         # Resolve effective date:
         # 1) API 'effective_on' if present and not "N/A"
-        # 2) API JSON text pattern like "... is effective March 11, 2025"
-        # 3) HTML fallback (proximity & sentence variants)
+        # 2) API 'dates' text and/or 'body_html_url'
+        # 3) HTML fallback (page text)
         api_eff_field = (data.get("effective_date") or "").strip()
         effective_resolved = api_eff_field if api_eff_field and api_eff_field.upper() != "N/A" else None
 
-        if not effective_resolved and api_text_effective:
-            effective_resolved = api_text_effective
-
         if not effective_resolved:
-            effective_resolved = extract_effective_date_from_text(details.get("_full_html_text", ""))
+            effective_resolved = extract_effective_from_api_document(
+                api_doc,
+                html_fallback_text=details.get("_full_html_text", "")
+            )
 
         st.subheader("📅 Effective Date")
         st.write(effective_resolved or api_eff_field or "N/A")
