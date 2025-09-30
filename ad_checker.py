@@ -6,6 +6,7 @@ from bs4 import BeautifulSoup
 import json
 import io
 import csv
+import re
 from datetime import datetime
 
 # --- PDF (ReportLab) imports ---
@@ -42,8 +43,29 @@ if "compliance_records" not in st.session_state:
 # -----------------------------
 ad_number = st.text_input("Enter AD Number (e.g., 2020-06-14):").strip()
 
-# NEW: Customer for report (manual input)
+# Customer for report (manual input)
 customer_for_report = st.text_input("Customer (for report):").strip()
+
+# -----------------------------
+# Utilities (Effective Date Extraction)
+# -----------------------------
+EFFECTIVE_SENTENCE_RE = re.compile(
+    r"This\s+AD\s+is\s+effective\s+([A-Za-z]+ \d{1,2}, \d{4})",
+    re.IGNORECASE
+)
+
+def extract_effective_date_from_text(text: str) -> str | None:
+    """Extracts 'This AD is effective Month DD, YYYY' from text and normalizes to YYYY-MM-DD."""
+    if not text:
+        return None
+    m = EFFECTIVE_SENTENCE_RE.search(text.replace("\u00a0", " "))
+    if not m:
+        return None
+    date_str = m.group(1).strip()
+    try:
+        return datetime.strptime(date_str, "%B %d, %Y").date().isoformat()
+    except ValueError:
+        return None
 
 # -----------------------------
 # Data fetchers
@@ -86,6 +108,7 @@ def extract_details_from_html(html_url: str):
         response = requests.get(html_url, headers=headers, timeout=10)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
+        full_text = soup.get_text("\n", strip=True)  # capture full page text for effective-date parsing
 
         def find_section_text(keyword: str):
             candidates = soup.find_all(["strong", "h4", "h3", "h2"])
@@ -105,14 +128,16 @@ def extract_details_from_html(html_url: str):
         return {
             "affected_aircraft": find_section_text("Applicability"),
             "required_actions": find_section_text("Compliance"),
-            "compliance_times": find_section_text("Compliance Time")
+            "compliance_times": find_section_text("Compliance Time"),
+            "_full_html_text": full_text,  # for effective-date extraction
         }
 
     except Exception as e:
         return {
             "affected_aircraft": f"Error extracting: {e}",
             "required_actions": "N/A",
-            "compliance_times": "N/A"
+            "compliance_times": "N/A",
+            "_full_html_text": "",
         }
 
 # -----------------------------
@@ -201,10 +226,11 @@ def build_pdf_report(
         ["AD Title", ad_data.get("title") or ""],
         ["Publication Date", ad_data.get("publication_date") or "N/A"],
         ["Effective Date", ad_data.get("effective_date") or "N/A"],
-        ["Customer", customer or ""],         # <-- replaced 'HTML'
-        ["Aircraft", aircraft or ""],         # <-- replaced 'PDF' (from Serials/MSN/PNs)
+        ["Customer", customer or ""],        # manual input
+        ["Aircraft", aircraft or ""],        # from Serials / MSN / PNs
     ]
     meta_table = Table(meta_data, colWidths=[40*mm, 120*mm], hAlign="LEFT")
+    from reportlab.lib import colors  # ensure imported for styles
     meta_table.setStyle(TableStyle([
         ("BOX", (0,0), (-1,-1), 0.5, colors.grey),
         ("INNERGRID", (0,0), (-1,-1), 0.25, colors.grey),
@@ -304,27 +330,39 @@ if ad_number:
         st.write(f"**AD Number:** {ad_number}")
         st.write(f"**Document Number:** {data['document_number']}")
         st.write(f"**Publication Date:** {data.get('publication_date') or 'N/A'}")
-        st.write(f"**Effective Date:** {data['effective_date'] or 'N/A'}")
-        st.markdown(f"[View Full AD (HTML)]({data['html_url']})")
-        st.markdown(f"[View PDF]({data['pdf_url']})")
+        st.write(f"**Effective Date (API):** {data['effective_date'] or 'N/A'}")
+        st.markdown(f"[🔗 View Full AD (HTML)]({data['html_url']})")
+        st.markdown(f"[📄 View PDF]({data['pdf_url']})")
 
-        with st.spinner("Extracting AD details from HTML..."):
+        with st.spinner("📄 Extracting AD details from HTML..."):
             details = extract_details_from_html(data['html_url'])
 
-        st.subheader("Affected Aircraft / SB References")
+        # Resolve effective date from HTML sentence if API missing
+        effective_resolved = data.get("effective_date")
+        if not effective_resolved:
+            effective_resolved = extract_effective_date_from_text(details.get("_full_html_text", ""))
+
+        st.subheader("📅 Effective Date")
+        st.write(effective_resolved or data.get("effective_date") or "N/A")
+
+        # Ensure the PDF uses the resolved value if we found one
+        if effective_resolved:
+            data["effective_date"] = effective_resolved
+
+        st.subheader("🛩️ Affected Aircraft / SB References")
         st.write(details['affected_aircraft'])
 
-        st.subheader("Required Actions")
+        st.subheader("🔧 Required Actions")
         st.write(details['required_actions'])
 
-        st.subheader("Compliance Deadlines")
+        st.subheader("📅 Compliance Deadlines")
         st.write(details['compliance_times'])
 
         # ==============================
         # Compliance Recording Section
         # ==============================
         st.divider()
-        st.subheader("Compliance Status for this AD")
+        st.subheader("✅ Compliance Status for this AD")
 
         with st.form("compliance_form"):
             col1, col2 = st.columns(2)
@@ -405,7 +443,7 @@ if ad_number:
 
         # Show recorded entries + CSV export
         if st.session_state["compliance_records"]:
-            st.subheader("Recorded Compliance Entries")
+            st.subheader("🗂️ Recorded Compliance Entries")
             for idx, rec in enumerate(st.session_state["compliance_records"], start=1):
                 st.markdown(f"**Entry {idx}** — Status: {rec['status']}")
                 st.json({k: v for k, v in rec.items()})
@@ -456,7 +494,7 @@ if ad_number:
                         aircraft_for_report = st.session_state["compliance_records"][-1].get("applic_serials", "") or ""
 
                     pdf_bytes = build_pdf_report(
-                        ad_data=data,                  # includes ad_number
+                        ad_data=data,                  # includes ad_number & resolved effective date
                         details=details,
                         records=st.session_state["compliance_records"],
                         logo_url=LOGO_URL,
