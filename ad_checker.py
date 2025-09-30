@@ -136,6 +136,63 @@ def find_sb_refs(text: str) -> list[str]:
     return out
 
 # -----------------------------
+# ATA Chapter detection
+# -----------------------------
+ATA_DIRECT_RE = re.compile(
+    r"\b(?:ATA|ATA\s*chapter|chapter\s*(?:ATA)?)\s*[-:]?\s*(\d{2})(?:[.\- ]?(\d{2}))?\b",
+    re.IGNORECASE
+)
+
+# very light keyword fallback if explicit "ATA 27" isn't present
+ATA_KEYWORD_HINTS = [
+    (r"\bflight controls?\b", "27"),
+    (r"\bfuel\b", "28"),
+    (r"\bdoors?\b", "52"),
+    (r"\bfuselage\b", "53"),
+    (r"\bwings?\b", "57"),
+    (r"\bnavigation\b", "34"),
+    (r"\belectrical power\b", "24"),
+    (r"\bequipment|furnishings\b", "25"),
+    (r"\blanding gear\b", "32"),
+    (r"\bair conditioning\b", "21"),
+]
+
+def detect_ata_chapter(full_text: str, sb_refs: list[str] | None = None) -> str | None:
+    if not full_text:
+        return None
+    t = full_text.replace("\u00a0", " ")
+
+    # 1) Direct matches like "ATA 27", "ATA chapter 27-10"
+    candidates = []
+    for m in ATA_DIRECT_RE.finditer(t):
+        major = m.group(1)
+        minor = m.group(2)
+        if minor:
+            candidates.append(f"{major}-{minor}")
+        else:
+            candidates.append(major)
+    if candidates:
+        # choose the shortest (prefer major) most frequent
+        from collections import Counter
+        c = Counter(candidates)
+        return c.most_common(1)[0][0]
+
+    # 2) If SB refs contain patterns like "...-XX-..." (not common, but try)
+    if sb_refs:
+        for ref in sb_refs:
+            m = re.search(r"-(\d{2})-", ref)
+            if m:
+                return m.group(1)
+
+    # 3) Keyword hints
+    tl = t.lower()
+    for pat, code in ATA_KEYWORD_HINTS:
+        if re.search(pat, tl):
+            return code
+
+    return None
+
+# -----------------------------
 # Data fetchers
 # -----------------------------
 def fetch_ad_data(ad_number: str):
@@ -305,7 +362,8 @@ def build_pdf_report(
     logo_url: str,
     site_url: str,
     customer: str,
-    aircraft: str
+    aircraft: str,
+    ata_chapter: str | None
 ) -> bytes:
     if not REPORTLAB_AVAILABLE:
         raise RuntimeError("ReportLab is not installed. Add 'reportlab' to your requirements.txt.")
@@ -371,6 +429,7 @@ def build_pdf_report(
         ["AD Title", ad_data.get("title") or ""],
         ["Publication Date", ad_data.get("publication_date") or "N/A"],
         ["Effective Date", ad_data.get("effective_date") or "N/A"],  # dd-mm-yyyy
+        ["ATA Chapter", ata_chapter or "N/A"],
         ["Customer", customer or ""],
         ["Aircraft", aircraft or ""],
     ]
@@ -493,10 +552,18 @@ if ad_number:
     if data:
         data["ad_number"] = ad_number
         st.success(f"✅ Found: {data['title']}")
-        st.write(f"**AD Number:** {ad_number}")
-        st.write(f"**Document Number:** {data['document_number']}")
-        st.write(f"**Publication Date:** {data.get('publication_date') or 'N/A'}")
-        st.write(f"**Effective Date (API field):** {to_ddmmyyyy(data.get('effective_date')) or 'N/A'}")
+        # Top meta row with ATA in the upper-right
+        col_left, col_right = st.columns([3, 1])
+        with col_left:
+            st.write(f"**AD Number:** {ad_number}")
+            st.write(f"**Document Number:** {data['document_number']}")
+            st.write(f"**Publication Date:** {data.get('publication_date') or 'N/A'}")
+            st.write(f"**Effective Date (API field):** {to_ddmmyyyy(data.get('effective_date')) or 'N/A'}")
+        with col_right:
+            st.markdown("<div style='text-align:right;font-weight:600;'>ATA Chapter</div>", unsafe_allow_html=True)
+            # placeholder, filled once we parse details below
+            ata_input_placeholder = st.empty()
+
         st.markdown(f"[🔗 View Full AD (HTML)]({data['html_url']})")
         st.markdown(f"[📄 View PDF]({data['pdf_url']})")
 
@@ -506,6 +573,15 @@ if ad_number:
         # Extract section details
         with st.spinner("📄 Extracting AD details..."):
             details = extract_details(data['html_url'], api_doc)
+
+        # Detect ATA
+        detected_ata = detect_ata_chapter(details.get("_full_html_text",""), details.get("sb_references"))
+        with col_right:
+            ata_chapter = ata_input_placeholder.text_input(
+                label="ATA Chapter (editable)",
+                value=detected_ata or "",
+                key="ata_chapter_input"
+            )
 
         # Resolve effective date (ISO → dd-mm-yyyy)
         api_eff_field_iso = (data.get("effective_date") or "").strip()
@@ -677,7 +753,8 @@ if ad_number:
                         logo_url=LOGO_URL,
                         site_url=SITE_URL,
                         customer=customer_for_report,
-                        aircraft=aircraft_for_report
+                        aircraft=aircraft_for_report,
+                        ata_chapter=ata_chapter if ata_chapter else detect_ata_chapter(details.get("_full_html_text",""), details.get("sb_references"))
                     )
                     st.download_button(
                         "Download AD Report (PDF)",
