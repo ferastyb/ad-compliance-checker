@@ -38,12 +38,6 @@ if "compliance_records" not in st.session_state:
     st.session_state["compliance_records"] = []
 
 # -----------------------------
-# Inputs
-# -----------------------------
-ad_number = st.text_input("Enter AD Number (e.g., 2025-01-01):").strip()
-customer_for_report = st.text_input("Customer (for report):").strip()
-
-# -----------------------------
 # Effective Date Utilities
 # -----------------------------
 EFFECTIVE_SENTENCE_RE = re.compile(
@@ -69,7 +63,7 @@ def extract_effective_date_from_text(text: str) -> str | None:
             return norm
     eff_idx = t.lower().find("effective")
     if eff_idx != -1:
-        window = t[eff_idx:eff_idx + 180]
+        window = t[eff_idx:eff_idx + 240]  # slightly larger window
         m2 = MONTH_DATE_RE.search(window)
         if m2:
             norm = _normalize_date(m2.group(1))
@@ -92,52 +86,11 @@ def to_ddmmyyyy(date_str: str | None) -> str | None:
         return date_str
 
 # -----------------------------
-# NEW: Section + SB Utilities
-# -----------------------------
-def parse_lettered_sections(full_text: str):
-    """
-    Build a dict of lettered sections from plain text:
-      { 'a': {'title': 'Authority', 'text': '...'}, 'c': {'title': 'Applicability', 'text': '...'}, ... }
-    Robust to punctuation after title and varying whitespace.
-    """
-    sections = {}
-    if not full_text:
-        return sections
-
-    t = full_text.replace("\u00a0", " ")
-    # Find all section headers like "(c) Applicability", "(g) Required Actions", capturing positions
-    header_re = re.compile(r"\(\s*([a-z])\s*\)\s*([A-Za-z][^\n]{0,120})", re.IGNORECASE)
-    matches = list(header_re.finditer(t))
-    for i, m in enumerate(matches):
-        letter = m.group(1).lower()
-        title = (m.group(2) or "").strip()
-        start = m.end()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(t)
-        body = t[start:end].strip()
-        # Clean title trailing punctuation
-        title = re.sub(r"[.:;\s]+$", "", title)
-        sections[letter] = {"title": title, "text": body}
-    return sections
-
-def find_sb_references(text: str) -> list[str]:
-    if not text:
-        return []
-    sb_pat = re.compile(r"\b[A-Z0-9]+(?:-[A-Z0-9]+)*-SB[0-9A-Z]+(?:-[0-9A-Z]+)*\b")
-    refs = sb_pat.findall(text.upper())
-    seen, ordered = set(), []
-    for r in refs:
-        if r not in seen:
-            seen.add(r)
-            ordered.append(r)
-    return ordered
-
-# -----------------------------
 # Data fetchers
 # -----------------------------
 def fetch_ad_data(ad_number: str):
     base_url = "https://www.federalregister.gov/api/v1/documents.json"
     headers = {"User-Agent": "Mozilla/5.0"}
-
     try:
         response = requests.get(
             base_url,
@@ -147,7 +100,6 @@ def fetch_ad_data(ad_number: str):
         )
         response.raise_for_status()
         results = response.json().get("results", [])
-
         for doc in results:
             title = (doc.get("title") or "")
             if ad_number in title or "airworthiness directive" in title.lower():
@@ -159,12 +111,9 @@ def fetch_ad_data(ad_number: str):
                     "document_number": doc.get("document_number"),
                     "publication_date": doc.get("publication_date"),
                 }
-
     except requests.RequestException as e:
         st.error(f"❌ Request failed: {e}")
-
     return None
-
 
 def fetch_document_json(document_number: str) -> dict | None:
     if not document_number:
@@ -178,17 +127,14 @@ def fetch_document_json(document_number: str) -> dict | None:
     except Exception:
         return None
 
-
 def extract_effective_from_api_document(doc_json: dict, html_fallback_text: str | None = None) -> str | None:
     if not doc_json:
         doc_json = {}
-
     dates_field = doc_json.get("dates")
     if isinstance(dates_field, str) and dates_field.strip():
         found = extract_effective_date_from_text(dates_field)
         if found:
             return found
-
     body_html_url = doc_json.get("body_html_url")
     if body_html_url:
         try:
@@ -200,113 +146,179 @@ def extract_effective_from_api_document(doc_json: dict, html_fallback_text: str 
                 return found
         except Exception:
             pass
-
-    candidates = []
     for key in ("abstract", "excerpts", "title"):
         val = doc_json.get(key)
         if isinstance(val, str) and val.strip():
-            candidates.append(val)
+            text = BeautifulSoup(val, "html.parser").get_text(" ", strip=True)
+            found = extract_effective_date_from_text(text)
+            if found:
+                return found
         elif isinstance(val, list):
-            candidates.extend([x for x in val if isinstance(x, str)])
-
-    for c in candidates:
-        text = BeautifulSoup(c, "html.parser").get_text(" ", strip=True)
-        found = extract_effective_date_from_text(text)
-        if found:
-            return found
-
+            for x in val:
+                if isinstance(x, str):
+                    text = BeautifulSoup(x, "html.parser").get_text(" ", strip=True)
+                    found = extract_effective_date_from_text(text)
+                    if found:
+                        return found
     if html_fallback_text:
         return extract_effective_date_from_text(html_fallback_text)
-
     return None
 
+# -----------------------------
+# Robust (c)/(g) section + SB extraction using body_html_url first
+# -----------------------------
+LETTER_HEADER_PAT = re.compile(r"^\(\s*([a-z])\s*\)\s*(.+)$", re.IGNORECASE)
 
-def extract_details_from_html(html_url: str):
+def _dom_iter_blocks(container):
+    """Yield semantically significant blocks in order (headers, paragraphs, lists)."""
+    for el in container.descendants:
+        if getattr(el, "name", None) in ("h2", "h3", "h4", "strong", "p", "li"):
+            # Skip empty
+            txt = el.get_text(" ", strip=True)
+            if txt:
+                yield el, txt
+
+def _split_lettered_sections_from_dom(root):
     """
+    Walk the DOM and split content by lettered headers like "(c) Applicability".
+    Returns: dict(letter -> {'title': str, 'nodes': [elements], 'text': '...'})
+    """
+    sections = {}
+    current_key = None
+    current_title = None
+    current_nodes = []
+
+    for el, txt in _dom_iter_blocks(root):
+        m = LETTER_HEADER_PAT.match(txt)
+        if m:
+            # commit previous
+            if current_key:
+                sections[current_key] = {
+                    "title": current_title or "",
+                    "nodes": current_nodes[:],
+                    "text": " ".join(n.get_text(" ", strip=True) for n in current_nodes).strip()
+                }
+            current_key = m.group(1).lower()
+            current_title = re.sub(r"[.:;\s]+$", "", m.group(2)).strip()
+            current_nodes = []
+        else:
+            if current_key:
+                current_nodes.append(el)
+
+    if current_key:
+        sections[current_key] = {
+            "title": current_title or "",
+            "nodes": current_nodes[:],
+            "text": " ".join(n.get_text(" ", strip=True) for n in current_nodes).strip()
+        }
+    return sections
+
+SB_CODE_PAT = re.compile(r"\b[A-Z0-9]+(?:-[A-Z0-9]+)*-SB[0-9A-Z]+(?:-[0-9A-Z]+)*\b", re.IGNORECASE)
+
+def _find_sb_refs(text: str) -> list[str]:
+    if not text:
+        return []
+    refs = [m.group(0).upper() for m in SB_CODE_PAT.finditer(text)]
+    out, seen = [], set()
+    for r in refs:
+        if r not in seen:
+            seen.add(r)
+            out.append(r)
+    return out
+
+def extract_details(ad_html_url: str, api_doc: dict | None):
+    """
+    Prefer parsing the API's body_html_url DOM; fallback to the public HTML page.
     Extract:
-      - Affected Aircraft from (c) Applicability (fallback: header-based search)
-      - Required Actions from (g) Required Actions (for context)
-      - SB References from the (g) text (fallback: whole document)
-      - Compliance Time (legacy)
-
-    Returns a dict incl. '_full_html_text' for date parsing fallback.
+      - (c) Applicability text
+      - (g) Required Actions text
+      - SB refs (from (g) first; fallback to whole doc)
+      - full page text for any residual fallbacks
     """
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(html_url, headers=headers, timeout=12)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "html.parser")
-        full_text = soup.get_text("\n", strip=True)
+    headers = {"User-Agent": "Mozilla/5.0"}
 
-        # Parse all lettered sections once
-        sections = parse_lettered_sections(full_text)
+    # 1) Try body_html_url (canonical FR body content)
+    soup_body = None
+    full_text = ""
+    if api_doc and api_doc.get("body_html_url"):
+        try:
+            r = requests.get(api_doc["body_html_url"], headers=headers, timeout=12)
+            r.raise_for_status()
+            soup_body = BeautifulSoup(r.text, "html.parser")
+            full_text = soup_body.get_text("\n", strip=True)
+        except Exception:
+            soup_body = None
 
-        # Helper: legacy header-based content (fallback)
-        def legacy_find_section_text(keyword: str):
-            candidates = soup.find_all(["strong", "h4", "h3", "h2"])
-            for tag in candidates:
-                if tag.get_text(strip=True).lower().startswith(keyword.lower()):
-                    content = ""
-                    for sibling in tag.next_siblings:
-                        if getattr(sibling, "name", "") in ["strong", "h4", "h3", "h2"]:
-                            break
-                        if hasattr(sibling, 'get_text'):
-                            content += sibling.get_text(separator="\n", strip=True) + "\n"
-                        elif isinstance(sibling, str):
-                            content += sibling.strip() + "\n"
-                    return content.strip()
-            return ""
+    # 2) Fallback to the public HTML page
+    if soup_body is None:
+        try:
+            r = requests.get(ad_html_url, headers=headers, timeout=12)
+            r.raise_for_status()
+            soup_body = BeautifulSoup(r.text, "html.parser")
+            if not full_text:
+                full_text = soup_body.get_text("\n", strip=True)
+        except Exception as e:
+            # ultimate fallback if we couldn't fetch any HTML
+            return {
+                "affected_aircraft": f"Error extracting: {e}",
+                "required_actions": "N/A",
+                "compliance_times": "N/A",
+                "sb_references": [],
+                "_full_html_text": "",
+            }
 
-        # (c) Applicability
-        applic_text = None
-        csec = sections.get("c")
-        if csec:
-            # Prefer when the title actually mentions Applicability
-            if re.search(r"\bApplicability\b", csec["title"], flags=re.IGNORECASE):
-                applic_text = csec["text"]
-            else:
-                # Even if the title is odd, use the text if it clearly contains applicability-related words
-                if re.search(r"\bapplicab|aircraft|model|serial|msn|pn\b", csec["text"], flags=re.IGNORECASE):
-                    applic_text = csec["text"]
+    # Build sections from DOM
+    sections = _split_lettered_sections_from_dom(soup_body)
 
-        if not applic_text:
-            # Fallback to legacy header scan
-            applic_text = legacy_find_section_text("Applicability")
+    # (c) Applicability
+    affected = "N/A"
+    csec = sections.get("c")
+    if csec:
+        # Prefer if title mentions Applicability
+        if re.search(r"\bApplicability\b", csec["title"], re.IGNORECASE):
+            affected = csec["text"] or "N/A"
+        else:
+            # Even if titled oddly, if the body clearly looks like applicability
+            if re.search(r"\bapplicab|aircraft|model|serial|msn|pn\b", csec["text"], re.IGNORECASE):
+                affected = csec["text"] or "N/A"
 
-        # (g) Required Actions
-        req_actions_text = None
-        gsec = sections.get("g")
-        if gsec:
-            if re.search(r"\bRequired Actions\b", gsec["title"], flags=re.IGNORECASE):
-                req_actions_text = gsec["text"]
-            else:
-                if re.search(r"\baction|comply|do the following\b", gsec["text"], flags=re.IGNORECASE):
-                    req_actions_text = gsec["text"]
+    # (g) Required Actions
+    req_actions = "N/A"
+    gsec = sections.get("g")
+    if gsec:
+        if re.search(r"\bRequired Actions\b", gsec["title"], re.IGNORECASE):
+            req_actions = gsec["text"] or "N/A"
+        else:
+            if re.search(r"\baction|comply|do the following|requirements\b", gsec["text"], re.IGNORECASE):
+                req_actions = gsec["text"] or "N/A"
 
-        if not req_actions_text:
-            req_actions_text = legacy_find_section_text("Required Actions")
+    # SB refs: from (g) first, then global
+    sb_refs = []
+    if isinstance(gsec, dict):
+        sb_refs = _find_sb_refs(gsec.get("text", ""))
+    if not sb_refs:
+        sb_refs = _find_sb_refs(full_text)
 
-        # SB References: prefer from (g) text; else scan whole page
-        sb_refs = find_sb_references(req_actions_text) if req_actions_text else []
-        if not sb_refs:
-            sb_refs = find_sb_references(full_text)
+    # Compliance Time: try to locate the lettered section that mentions "Compliance"
+    compliance = "N/A"
+    # look for a section whose title contains "Compliance"
+    for letter, sec in sections.items():
+        if re.search(r"\bCompliance\b", sec["title"], re.IGNORECASE):
+            compliance = sec["text"] or "N/A"
+            break
+    if compliance == "N/A":
+        # simple keyword slice if needed
+        m = re.search(r"\bCompliance\b[:.]?\s*(.+?)(?=\n\s*\(|$)", full_text, re.IGNORECASE | re.DOTALL)
+        if m:
+            compliance = m.group(1).strip()
 
-        return {
-            "affected_aircraft": (applic_text or "N/A").strip(),
-            "required_actions": (req_actions_text or "N/A").strip(),
-            "compliance_times": (legacy_find_section_text("Compliance Time") or "N/A").strip(),
-            "sb_references": sb_refs,
-            "_full_html_text": full_text,
-        }
-
-    except Exception as e:
-        return {
-            "affected_aircraft": f"Error extracting: {e}",
-            "required_actions": "N/A",
-            "compliance_times": "N/A",
-            "sb_references": [],
-            "_full_html_text": "",
-        }
+    return {
+        "affected_aircraft": affected,
+        "required_actions": req_actions,
+        "compliance_times": compliance,
+        "sb_references": sb_refs,
+        "_full_html_text": full_text,
+    }
 
 # -----------------------------
 # PDF report builder
@@ -365,7 +377,6 @@ def build_pdf_report(
     small = ParagraphStyle("small", parent=normal, fontSize=9, leading=12, textColor=colors.grey)
 
     story = []
-
     if logo_flowable:
         story.append(logo_flowable)
     story.append(Paragraph(f'<font size="12"><a href="{site_url}">{site_url}</a></font>', small))
@@ -383,7 +394,7 @@ def build_pdf_report(
         ["Document Number", ad_data.get("document_number") or ""],
         ["AD Title", ad_data.get("title") or ""],
         ["Publication Date", ad_data.get("publication_date") or "N/A"],
-        ["Effective Date", ad_data.get("effective_date") or "N/A"],
+        ["Effective Date", ad_data.get("effective_date") or "N/A"],  # already dd-mm-yyyy
         ["Customer", customer or ""],
         ["Aircraft", aircraft or ""],
     ]
@@ -483,27 +494,29 @@ def build_pdf_report(
 # -----------------------------
 # Main flow
 # -----------------------------
+ad_number = ad_number = st.session_state.get("ad_number", st.session_state.get("ad_number", "")) or ad_number
 if ad_number:
     with st.spinner("🔍 Searching Federal Register..."):
         data = fetch_ad_data(ad_number)
 
     if data:
-        data["ad_number"] = ad_number  # ensure it appears in PDF
+        data["ad_number"] = ad_number
         st.success(f"✅ Found: {data['title']}")
         st.write(f"**AD Number:** {ad_number}")
         st.write(f"**Document Number:** {data['document_number']}")
         st.write(f"**Publication Date:** {data.get('publication_date') or 'N/A'}")
-        # Effective date shown as dd-mm-yyyy
         st.write(f"**Effective Date (API field):** {to_ddmmyyyy(data.get('effective_date')) or 'N/A'}")
         st.markdown(f"[🔗 View Full AD (HTML)]({data['html_url']})")
         st.markdown(f"[📄 View PDF]({data['pdf_url']})")
 
-        # Extract page details (incl. full_text)
-        with st.spinner("📄 Extracting AD details from HTML..."):
-            details = extract_details_from_html(data['html_url'])
-
-        # Fetch per-document JSON and resolve effective date (ISO → flip)
+        # Get per-document JSON (for dates + body_html_url)
         api_doc = fetch_document_json(data.get("document_number"))
+
+        # Extract sections (prefers body_html_url DOM)
+        with st.spinner("📄 Extracting AD details..."):
+            details = extract_details(data['html_url'], api_doc)
+
+        # Resolve effective date (ISO → flip)
         api_eff_field_iso = (data.get("effective_date") or "").strip()
         effective_resolved_iso = api_eff_field_iso if api_eff_field_iso and api_eff_field_iso.upper() != "N/A" else None
         if not effective_resolved_iso:
@@ -516,14 +529,14 @@ if ad_number:
         st.subheader("📅 Effective Date")
         st.write(eff_display or "N/A")
         if eff_display:
-            data["effective_date"] = eff_display  # Use flipped format in PDF
+            data["effective_date"] = eff_display  # use flipped date in PDF
 
-        # ---------------- Affected Aircraft + SB References (UI) ----------------
+        # ---- Applicability + SB References ----
         st.subheader("🛩️ Applicability / Affected Aircraft")
         st.write(details.get("affected_aircraft") or "N/A")
 
-        sb_list = details.get("sb_references") or []
         st.subheader("📎 SB References (from Required Actions)")
+        sb_list = details.get("sb_references") or []
         st.write(", ".join(sb_list) if sb_list else "N/A")
 
         st.subheader("🔧 Required Actions (raw section)")
