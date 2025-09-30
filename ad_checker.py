@@ -44,15 +44,8 @@ ad_number = st.text_input("Enter AD Number (e.g., 2025-01-01):").strip()
 customer_for_report = st.text_input("Customer (for report):").strip()
 
 # -----------------------------
-# Utilities (Effective Date Extraction)
+# Effective Date Utilities
 # -----------------------------
-# Main regex for common phrasings:
-#   "This AD is effective April 7, 2020."
-#   "This AD is effective (April 7, 2020)."
-#   "This AD becomes effective April 7, 2020."
-#   "AD 2025-01-01 is effective March 11, 2025."
-#   "(AD) is effective March 11, 2025."
-#   "AD ... is effective on March 11, 2025."
 EFFECTIVE_SENTENCE_RE = re.compile(
     r"(?:This\s*)?AD(?:\s+\d{4}-\d{2}-\d{2})?\s*(?:\([^)]*\))?\s*(?:is|becomes)\s*effective(?:\s+on)?\s*\(?\s*([A-Za-z]+ \d{1,2}, \d{4})\s*\)?",
     re.IGNORECASE | re.DOTALL
@@ -66,11 +59,6 @@ def _normalize_date(date_str: str) -> str | None:
         return None
 
 def extract_effective_date_from_text(text: str) -> str | None:
-    """
-    1) Try robust regex for “AD ... is/becomes effective (on) Month DD, YYYY”.
-    2) Proximity fallback: find 'effective' then scan next ~180 chars for Month DD, YYYY.
-    Returns ISO YYYY-MM-DD when found.
-    """
     if not text:
         return None
     t = text.replace("\u00a0", " ")
@@ -90,51 +78,53 @@ def extract_effective_date_from_text(text: str) -> str | None:
     return None
 
 def to_ddmmyyyy(date_str: str | None) -> str | None:
-    """Flip YYYY-MM-DD (or Month DD, YYYY) to DD-MM-YYYY for display/PDF. If parsing fails, return original."""
     if not date_str:
         return None
-    # Try ISO first
     try:
         dt = datetime.strptime(date_str[:10], "%Y-%m-%d")
         return dt.strftime("%d-%m-%Y")
     except Exception:
         pass
-    # Try Month DD, YYYY if ever passed through un-normalized
     try:
         dt = datetime.strptime(date_str.strip(), "%B %d, %Y")
         return dt.strftime("%d-%m-%Y")
     except Exception:
-        return date_str  # fallback: show as-is
+        return date_str
 
 # -----------------------------
-# NEW: Utilities for (c) & (g) sections and SB refs
+# NEW: Section + SB Utilities
 # -----------------------------
-# Extract a lettered section like "(c) Applicability" or "(g) Required Actions"
-def extract_lettered_section_text(full_text: str, letter: str, keyword: str) -> str | None:
+def parse_lettered_sections(full_text: str):
     """
-    Pulls the content following `(letter) keyword` up to the next `(x) <Title>` style marker.
-    Works on plain text extracted from the HTML page.
+    Build a dict of lettered sections from plain text:
+      { 'a': {'title': 'Authority', 'text': '...'}, 'c': {'title': 'Applicability', 'text': '...'}, ... }
+    Robust to punctuation after title and varying whitespace.
     """
+    sections = {}
     if not full_text:
-        return None
-    t = full_text.replace("\u00a0", " ")
-    # Start at "(c) Applicability" (case-insensitive), allow optional punctuation after keyword
-    pattern = rf"\(\s*{re.escape(letter)}\s*\)\s*{re.escape(keyword)}\.?\s*(.*?)(?=\(\s*[a-z]\s*\)\s*[A-Za-z]|$)"
-    m = re.search(pattern, t, flags=re.IGNORECASE | re.DOTALL)
-    if m:
-        return m.group(1).strip() or None
-    return None
+        return sections
 
-# Find SB-like references inside a block of text, e.g., "B787-81205-SB250290-00"
+    t = full_text.replace("\u00a0", " ")
+    # Find all section headers like "(c) Applicability", "(g) Required Actions", capturing positions
+    header_re = re.compile(r"\(\s*([a-z])\s*\)\s*([A-Za-z][^\n]{0,120})", re.IGNORECASE)
+    matches = list(header_re.finditer(t))
+    for i, m in enumerate(matches):
+        letter = m.group(1).lower()
+        title = (m.group(2) or "").strip()
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(t)
+        body = t[start:end].strip()
+        # Clean title trailing punctuation
+        title = re.sub(r"[.:;\s]+$", "", title)
+        sections[letter] = {"title": title, "text": body}
+    return sections
+
 def find_sb_references(text: str) -> list[str]:
     if not text:
         return []
-    # Pattern: prefix blocks, "-SB", then numbers/letters with optional hyphen chunks
     sb_pat = re.compile(r"\b[A-Z0-9]+(?:-[A-Z0-9]+)*-SB[0-9A-Z]+(?:-[0-9A-Z]+)*\b")
     refs = sb_pat.findall(text.upper())
-    # De-duplicate while preserving order
-    seen = set()
-    ordered = []
+    seen, ordered = set(), []
     for r in refs:
         if r not in seen:
             seen.add(r)
@@ -145,7 +135,6 @@ def find_sb_references(text: str) -> list[str]:
 # Data fetchers
 # -----------------------------
 def fetch_ad_data(ad_number: str):
-    """Search the Federal Register API for an AD by number and return core metadata."""
     base_url = "https://www.federalregister.gov/api/v1/documents.json"
     headers = {"User-Agent": "Mozilla/5.0"}
 
@@ -164,7 +153,7 @@ def fetch_ad_data(ad_number: str):
             if ad_number in title or "airworthiness directive" in title.lower():
                 return {
                     "title": title,
-                    "effective_date": doc.get("effective_on"),  # may already be YYYY-MM-DD
+                    "effective_date": doc.get("effective_on"),
                     "html_url": doc.get("html_url"),
                     "pdf_url": doc.get("pdf_url"),
                     "document_number": doc.get("document_number"),
@@ -178,7 +167,6 @@ def fetch_ad_data(ad_number: str):
 
 
 def fetch_document_json(document_number: str) -> dict | None:
-    """Fetch the per-document JSON payload (contains 'dates', 'body_html_url', etc.)."""
     if not document_number:
         return None
     url = f"https://www.federalregister.gov/api/v1/documents/{document_number}.json"
@@ -192,14 +180,6 @@ def fetch_document_json(document_number: str) -> dict | None:
 
 
 def extract_effective_from_api_document(doc_json: dict, html_fallback_text: str | None = None) -> str | None:
-    """
-    Try to parse the effective date from the per-document JSON:
-      1) 'dates' field (most reliable for “DATES: This AD is effective …”)
-      2) fetch and parse 'body_html_url'
-      3) scan other text-y fields (abstract, excerpts, title)
-      4) use provided fallback text (from page HTML) as last resort
-    Returns ISO YYYY-MM-DD if found.
-    """
     if not doc_json:
         doc_json = {}
 
@@ -242,7 +222,15 @@ def extract_effective_from_api_document(doc_json: dict, html_fallback_text: str 
 
 
 def extract_details_from_html(html_url: str):
-    """Pull key sections from the HTML page and return text + full page text for date parsing & SB refs."""
+    """
+    Extract:
+      - Affected Aircraft from (c) Applicability (fallback: header-based search)
+      - Required Actions from (g) Required Actions (for context)
+      - SB References from the (g) text (fallback: whole document)
+      - Compliance Time (legacy)
+
+    Returns a dict incl. '_full_html_text' for date parsing fallback.
+    """
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(html_url, headers=headers, timeout=12)
@@ -250,8 +238,11 @@ def extract_details_from_html(html_url: str):
         soup = BeautifulSoup(response.text, "html.parser")
         full_text = soup.get_text("\n", strip=True)
 
-        # Legacy, header-based extraction (kept for display context)
-        def find_section_text(keyword: str):
+        # Parse all lettered sections once
+        sections = parse_lettered_sections(full_text)
+
+        # Helper: legacy header-based content (fallback)
+        def legacy_find_section_text(keyword: str):
             candidates = soup.find_all(["strong", "h4", "h3", "h2"])
             for tag in candidates:
                 if tag.get_text(strip=True).lower().startswith(keyword.lower()):
@@ -266,19 +257,46 @@ def extract_details_from_html(html_url: str):
                     return content.strip()
             return ""
 
-        # NEW: Lettered sections (c) and (g)
-        applic_text = extract_lettered_section_text(full_text, "c", "Applicability") or find_section_text("Applicability")
-        req_actions_text = extract_lettered_section_text(full_text, "g", "Required Actions") or find_section_text("Required Actions")
+        # (c) Applicability
+        applic_text = None
+        csec = sections.get("c")
+        if csec:
+            # Prefer when the title actually mentions Applicability
+            if re.search(r"\bApplicability\b", csec["title"], flags=re.IGNORECASE):
+                applic_text = csec["text"]
+            else:
+                # Even if the title is odd, use the text if it clearly contains applicability-related words
+                if re.search(r"\bapplicab|aircraft|model|serial|msn|pn\b", csec["text"], flags=re.IGNORECASE):
+                    applic_text = csec["text"]
 
-        # NEW: SB references from the (g) section
-        sb_refs = find_sb_references(req_actions_text)
+        if not applic_text:
+            # Fallback to legacy header scan
+            applic_text = legacy_find_section_text("Applicability")
+
+        # (g) Required Actions
+        req_actions_text = None
+        gsec = sections.get("g")
+        if gsec:
+            if re.search(r"\bRequired Actions\b", gsec["title"], flags=re.IGNORECASE):
+                req_actions_text = gsec["text"]
+            else:
+                if re.search(r"\baction|comply|do the following\b", gsec["text"], flags=re.IGNORECASE):
+                    req_actions_text = gsec["text"]
+
+        if not req_actions_text:
+            req_actions_text = legacy_find_section_text("Required Actions")
+
+        # SB References: prefer from (g) text; else scan whole page
+        sb_refs = find_sb_references(req_actions_text) if req_actions_text else []
+        if not sb_refs:
+            sb_refs = find_sb_references(full_text)
 
         return {
-            "affected_aircraft": applic_text or "N/A",
-            "required_actions": req_actions_text or "N/A",
-            "compliance_times": find_section_text("Compliance Time") or "N/A",
-            "sb_references": sb_refs,         # <-- list of SB refs, e.g., ["B787-81205-SB250290-00"]
-            "_full_html_text": full_text,     # for effective-date extraction fallback
+            "affected_aircraft": (applic_text or "N/A").strip(),
+            "required_actions": (req_actions_text or "N/A").strip(),
+            "compliance_times": (legacy_find_section_text("Compliance Time") or "N/A").strip(),
+            "sb_references": sb_refs,
+            "_full_html_text": full_text,
         }
 
     except Exception as e:
@@ -302,11 +320,6 @@ def build_pdf_report(
     customer: str,
     aircraft: str
 ) -> bytes:
-    """
-    Build a PDF summarizing the AD search result, extracted sections, and compliance records.
-    PDF-only: logo is converted to grayscale and resized to ~30%, placed above the website link.
-    Includes SB References extracted from (g) Required Actions.
-    """
     if not REPORTLAB_AVAILABLE:
         raise RuntimeError("ReportLab is not installed. Add 'reportlab' to your requirements.txt.")
 
@@ -316,13 +329,13 @@ def build_pdf_report(
         from PIL import Image as PILImage
         resp = requests.get(logo_url, timeout=10)
         resp.raise_for_status()
-        pil_img = PILImage.open(io.BytesIO(resp.content)).convert("L")  # grayscale
+        pil_img = PILImage.open(io.BytesIO(resp.content)).convert("L")
         w, h = pil_img.size
-        pil_img = pil_img.resize((max(1, int(w * 0.3)), max(1, int(h * 0.3))), PILImage.LANCZOS)  # 30%
+        pil_img = pil_img.resize((max(1, int(w * 0.3)), max(1, int(h * 0.3))), PILImage.LANCZOS)
         logo_buf = io.BytesIO()
         pil_img.save(logo_buf, format="PNG")
         logo_buf.seek(0)
-        logo_flowable = Image(logo_buf)  # let ReportLab infer dimensions
+        logo_flowable = Image(logo_buf)
     except Exception:
         try:
             resp = requests.get(logo_url, timeout=10)
@@ -344,7 +357,7 @@ def build_pdf_report(
     )
 
     styles = getSampleStyleSheet()
-    from reportlab.lib import colors  # used in table style
+    from reportlab.lib import colors
     h1 = styles["Heading1"]
     h2 = styles["Heading2"]
     h3 = styles["Heading3"]
@@ -370,7 +383,7 @@ def build_pdf_report(
         ["Document Number", ad_data.get("document_number") or ""],
         ["AD Title", ad_data.get("title") or ""],
         ["Publication Date", ad_data.get("publication_date") or "N/A"],
-        ["Effective Date", ad_data.get("effective_date") or "N/A"],  # already dd-mm-yyyy
+        ["Effective Date", ad_data.get("effective_date") or "N/A"],
         ["Customer", customer or ""],
         ["Aircraft", aircraft or ""],
     ]
@@ -397,10 +410,7 @@ def build_pdf_report(
 
     story.append(Paragraph("SB References (from Required Actions)", h3))
     sb_list = details.get("sb_references") or []
-    if sb_list:
-        story.append(Paragraph(", ".join(sb_list), normal))
-    else:
-        story.append(Paragraph("N/A", normal))
+    story.append(Paragraph(", ".join(sb_list) if sb_list else "N/A", normal))
     story.append(Spacer(1, 8))
 
     story.append(Paragraph("Required Actions (raw section)", h3))
@@ -414,7 +424,8 @@ def build_pdf_report(
     story.append(Spacer(1, 8))
 
     story.append(Paragraph("Compliance Records", h2))
-    if not records:
+    records_list = records or []
+    if not records_list:
         story.append(Paragraph("No compliance records added.", normal))
     else:
         header = [
@@ -423,7 +434,7 @@ def build_pdf_report(
             "Date", "Hours", "Cycles", "Repetitive", "Interval", "Basis", "Next Due"
         ]
         rows = [header]
-        for rec in records:
+        for rec in records_list:
             next_due = rec.get("next_due") or {}
             if isinstance(next_due, dict):
                 nd_hours = next_due.get("hours")
@@ -482,38 +493,30 @@ if ad_number:
         st.write(f"**AD Number:** {ad_number}")
         st.write(f"**Document Number:** {data['document_number']}")
         st.write(f"**Publication Date:** {data.get('publication_date') or 'N/A'}")
+        # Effective date shown as dd-mm-yyyy
         st.write(f"**Effective Date (API field):** {to_ddmmyyyy(data.get('effective_date')) or 'N/A'}")
         st.markdown(f"[🔗 View Full AD (HTML)]({data['html_url']})")
         st.markdown(f"[📄 View PDF]({data['pdf_url']})")
 
+        # Extract page details (incl. full_text)
         with st.spinner("📄 Extracting AD details from HTML..."):
             details = extract_details_from_html(data['html_url'])
 
-        # Fetch per-document JSON (contains 'dates', 'body_html_url', etc.)
+        # Fetch per-document JSON and resolve effective date (ISO → flip)
         api_doc = fetch_document_json(data.get("document_number"))
-
-        # Resolve effective date as ISO first:
-        # 1) API 'effective_on' if present and not "N/A"
-        # 2) API 'dates'/body_html_url
-        # 3) HTML fallback
         api_eff_field_iso = (data.get("effective_date") or "").strip()
         effective_resolved_iso = api_eff_field_iso if api_eff_field_iso and api_eff_field_iso.upper() != "N/A" else None
-
         if not effective_resolved_iso:
             effective_resolved_iso = extract_effective_from_api_document(
                 api_doc,
                 html_fallback_text=details.get("_full_html_text", "")
             )
-
-        # Flip to dd-mm-yyyy for display & PDF
         eff_display = to_ddmmyyyy(effective_resolved_iso) or to_ddmmyyyy(api_eff_field_iso)
 
         st.subheader("📅 Effective Date")
         st.write(eff_display or "N/A")
-
-        # Ensure the PDF uses the flipped value
         if eff_display:
-            data["effective_date"] = eff_display
+            data["effective_date"] = eff_display  # Use flipped format in PDF
 
         # ---------------- Affected Aircraft + SB References (UI) ----------------
         st.subheader("🛩️ Applicability / Affected Aircraft")
@@ -521,10 +524,7 @@ if ad_number:
 
         sb_list = details.get("sb_references") or []
         st.subheader("📎 SB References (from Required Actions)")
-        if sb_list:
-            st.write(", ".join(sb_list))
-        else:
-            st.write("N/A")
+        st.write(", ".join(sb_list) if sb_list else "N/A")
 
         st.subheader("🔧 Required Actions (raw section)")
         st.write(details.get("required_actions") or "N/A")
@@ -601,7 +601,6 @@ if ad_number:
                 "rep_basis": rep_basis if rep else None,
             }
 
-            # Compute a simple "Next Due" for hours/cycles; store calendar as a definition
             next_due = {}
             if rep:
                 if rep_interval_unit == "hours" and record.get("performed_hours") is not None:
@@ -667,8 +666,8 @@ if ad_number:
                         aircraft_for_report = st.session_state["compliance_records"][-1].get("applic_serials", "") or ""
 
                     pdf_bytes = build_pdf_report(
-                        ad_data=data,                  # includes dd-mm-yyyy effective date now
-                        details=details,              # includes sb_references + sections
+                        ad_data=data,
+                        details=details,
                         records=st.session_state["compliance_records"],
                         logo_url=LOGO_URL,
                         site_url=SITE_URL,
