@@ -12,7 +12,6 @@ from datetime import datetime
 # --- PDF (ReportLab) imports ---
 try:
     from reportlab.lib.pagesizes import A4
-    from reportlab.lib import colors
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import mm
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
@@ -42,23 +41,27 @@ if "compliance_records" not in st.session_state:
 # Inputs
 # -----------------------------
 ad_number = st.text_input("Enter AD Number (e.g., 2020-06-14):").strip()
-
 # Customer for report (manual input)
 customer_for_report = st.text_input("Customer (for report):").strip()
 
 # -----------------------------
 # Utilities (Effective Date Extraction)
 # -----------------------------
+# Accepts:
+#   "This AD is effective April 7, 2020."
+#   "This AD is effective (April 7, 2020)."
+#   "This AD becomes effective April 7, 2020."
 EFFECTIVE_SENTENCE_RE = re.compile(
-    r"This\s+AD\s+is\s+effective\s+([A-Za-z]+ \d{1,2}, \d{4})",
-    re.IGNORECASE
+    r"This\s*AD\s*(?:is|becomes)\s*effective\s*\(?\s*([A-Za-z]+ \d{1,2}, \d{4})\s*\)?",
+    re.IGNORECASE | re.DOTALL
 )
 
 def extract_effective_date_from_text(text: str) -> str | None:
-    """Extracts 'This AD is effective Month DD, YYYY' from text and normalizes to YYYY-MM-DD."""
+    """Extract 'This AD (is|becomes) effective (Month DD, YYYY)' and normalize to YYYY-MM-DD."""
     if not text:
         return None
-    m = EFFECTIVE_SENTENCE_RE.search(text.replace("\u00a0", " "))
+    t = text.replace("\u00a0", " ")
+    m = EFFECTIVE_SENTENCE_RE.search(t)
     if not m:
         return None
     date_str = m.group(1).strip()
@@ -195,6 +198,7 @@ def build_pdf_report(
     )
 
     styles = getSampleStyleSheet()
+    from reportlab.lib import colors  # ensure imported for styles
     h1 = styles["Heading1"]
     h2 = styles["Heading2"]
     h3 = styles["Heading3"]
@@ -230,7 +234,6 @@ def build_pdf_report(
         ["Aircraft", aircraft or ""],        # from Serials / MSN / PNs
     ]
     meta_table = Table(meta_data, colWidths=[40*mm, 120*mm], hAlign="LEFT")
-    from reportlab.lib import colors  # ensure imported for styles
     meta_table.setStyle(TableStyle([
         ("BOX", (0,0), (-1,-1), 0.5, colors.grey),
         ("INNERGRID", (0,0), (-1,-1), 0.25, colors.grey),
@@ -337,13 +340,14 @@ if ad_number:
         with st.spinner("📄 Extracting AD details from HTML..."):
             details = extract_details_from_html(data['html_url'])
 
-        # Resolve effective date from HTML sentence if API missing
-        effective_resolved = data.get("effective_date")
+        # Resolve effective date: prefer API if truthy and not "N/A"; otherwise parse HTML
+        api_eff = (data.get("effective_date") or "").strip()
+        effective_resolved = api_eff if api_eff and api_eff.upper() != "N/A" else None
         if not effective_resolved:
             effective_resolved = extract_effective_date_from_text(details.get("_full_html_text", ""))
 
         st.subheader("📅 Effective Date")
-        st.write(effective_resolved or data.get("effective_date") or "N/A")
+        st.write(effective_resolved or api_eff or "N/A")
 
         # Ensure the PDF uses the resolved value if we found one
         if effective_resolved:
