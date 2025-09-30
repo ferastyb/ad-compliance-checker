@@ -40,24 +40,26 @@ if "compliance_records" not in st.session_state:
 # -----------------------------
 # Inputs
 # -----------------------------
-ad_number = st.text_input("Enter AD Number (e.g., 2020-06-14):").strip()
+ad_number = st.text_input("Enter AD Number (e.g., 2025-01-01):").strip()
 # Customer for report (manual input)
 customer_for_report = st.text_input("Customer (for report):").strip()
 
 # -----------------------------
 # Utilities (Effective Date Extraction)
 # -----------------------------
-# Accepts:
+# Matches:
 #   "This AD is effective April 7, 2020."
 #   "This AD is effective (April 7, 2020)."
 #   "This AD becomes effective April 7, 2020."
+#   "AD 2025-01-01 is effective March 11, 2025."
+#   "(AD) is effective March 11, 2025."
 EFFECTIVE_SENTENCE_RE = re.compile(
-    r"This\s*AD\s*(?:is|becomes)\s*effective\s*\(?\s*([A-Za-z]+ \d{1,2}, \d{4})\s*\)?",
+    r"(?:This\s+)?AD(?:\s+\d{4}-\d{2}-\d{2})?\s*(?:\([^)]*\))?\s*(?:is|becomes)\s+effective\s*\(?\s*([A-Za-z]+ \d{1,2}, \d{4})\s*\)?",
     re.IGNORECASE | re.DOTALL
 )
 
 def extract_effective_date_from_text(text: str) -> str | None:
-    """Extract 'This AD (is|becomes) effective (Month DD, YYYY)' and normalize to YYYY-MM-DD."""
+    """Extract '... AD ... (is|becomes) effective (Month DD, YYYY)' and normalize to YYYY-MM-DD."""
     if not text:
         return None
     t = text.replace("\u00a0", " ")
@@ -74,6 +76,7 @@ def extract_effective_date_from_text(text: str) -> str | None:
 # Data fetchers
 # -----------------------------
 def fetch_ad_data(ad_number: str):
+    """Search the Federal Register API for an AD by number and return core metadata."""
     base_url = "https://www.federalregister.gov/api/v1/documents.json"
     headers = {"User-Agent": "Mozilla/5.0"}
 
@@ -88,7 +91,7 @@ def fetch_ad_data(ad_number: str):
         results = response.json().get("results", [])
 
         for doc in results:
-            title = doc.get("title", "")
+            title = doc.get("title", "") or ""
             if ad_number in title or "airworthiness directive" in title.lower():
                 return {
                     "title": title,
@@ -96,7 +99,7 @@ def fetch_ad_data(ad_number: str):
                     "html_url": doc.get("html_url"),
                     "pdf_url": doc.get("pdf_url"),
                     "document_number": doc.get("document_number"),
-                    "publication_date": doc.get("publication_date")
+                    "publication_date": doc.get("publication_date"),
                 }
 
     except requests.RequestException as e:
@@ -105,13 +108,58 @@ def fetch_ad_data(ad_number: str):
     return None
 
 
+def fetch_document_json(document_number: str) -> dict | None:
+    """Fetch the per-document JSON payload to scan API-provided text (e.g., body_html)."""
+    if not document_number:
+        return None
+    url = f"https://www.federalregister.gov/api/v1/documents/{document_number}.json"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        r = requests.get(url, headers=headers, timeout=12)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
+
+
+def extract_effective_from_api_document(doc_json: dict, fallback_text: str | None = None) -> str | None:
+    """Try to parse effective date from API fields such as body_html, abstract, or provided fallback text."""
+    if not doc_json:
+        doc_json = {}
+
+    # Try likely string fields in order of richness
+    candidates = []
+    for key in ("body_html", "comments_opening", "excerpts", "abstract", "title"):
+        val = doc_json.get(key)
+        if isinstance(val, str) and val.strip():
+            candidates.append(val)
+        elif isinstance(val, list):
+            # Some fields like excerpts might be lists of strings
+            candidates.extend([x for x in val if isinstance(x, str)])
+
+    # Search each candidate
+    for c in candidates:
+        # Strip HTML if present
+        text = BeautifulSoup(c, "html.parser").get_text(" ", strip=True)
+        found = extract_effective_date_from_text(text)
+        if found:
+            return found
+
+    # Last resort: caller-provided fallback text
+    if fallback_text:
+        return extract_effective_date_from_text(fallback_text)
+
+    return None
+
+
 def extract_details_from_html(html_url: str):
+    """Pull key sections from the HTML page and return text + full page text for date parsing fallback."""
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(html_url, headers=headers, timeout=10)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
-        full_text = soup.get_text("\n", strip=True)  # capture full page text for effective-date parsing
+        full_text = soup.get_text("\n", strip=True)
 
         def find_section_text(keyword: str):
             candidates = soup.find_all(["strong", "h4", "h3", "h2"])
@@ -132,7 +180,7 @@ def extract_details_from_html(html_url: str):
             "affected_aircraft": find_section_text("Applicability"),
             "required_actions": find_section_text("Compliance"),
             "compliance_times": find_section_text("Compliance Time"),
-            "_full_html_text": full_text,  # for effective-date extraction
+            "_full_html_text": full_text,
         }
 
     except Exception as e:
@@ -198,7 +246,7 @@ def build_pdf_report(
     )
 
     styles = getSampleStyleSheet()
-    from reportlab.lib import colors  # ensure imported for styles
+    from reportlab.lib import colors  # used in table style
     h1 = styles["Heading1"]
     h2 = styles["Heading2"]
     h3 = styles["Heading3"]
@@ -333,21 +381,32 @@ if ad_number:
         st.write(f"**AD Number:** {ad_number}")
         st.write(f"**Document Number:** {data['document_number']}")
         st.write(f"**Publication Date:** {data.get('publication_date') or 'N/A'}")
-        st.write(f"**Effective Date (API):** {data['effective_date'] or 'N/A'}")
+        st.write(f"**Effective Date (API field):** {data.get('effective_date') or 'N/A'}")
         st.markdown(f"[🔗 View Full AD (HTML)]({data['html_url']})")
         st.markdown(f"[📄 View PDF]({data['pdf_url']})")
+
+        # Try to pull effective date directly from the API per-document JSON (e.g., in body_html)
+        api_doc = fetch_document_json(data.get("document_number"))
+        api_text_effective = extract_effective_from_api_document(api_doc)
 
         with st.spinner("📄 Extracting AD details from HTML..."):
             details = extract_details_from_html(data['html_url'])
 
-        # Resolve effective date: prefer API if truthy and not "N/A"; otherwise parse HTML
-        api_eff = (data.get("effective_date") or "").strip()
-        effective_resolved = api_eff if api_eff and api_eff.upper() != "N/A" else None
+        # Resolve effective date priority:
+        # 1) API 'effective_on' if present and not "N/A"
+        # 2) API body text line like "(AD) is effective March 11, 2025"
+        # 3) HTML sentence fallback
+        api_eff_field = (data.get("effective_date") or "").strip()
+        effective_resolved = api_eff_field if api_eff_field and api_eff_field.upper() != "N/A" else None
+
+        if not effective_resolved and api_text_effective:
+            effective_resolved = api_text_effective
+
         if not effective_resolved:
             effective_resolved = extract_effective_date_from_text(details.get("_full_html_text", ""))
 
         st.subheader("📅 Effective Date")
-        st.write(effective_resolved or api_eff or "N/A")
+        st.write(effective_resolved or api_eff_field or "N/A")
 
         # Ensure the PDF uses the resolved value if we found one
         if effective_resolved:
@@ -521,4 +580,4 @@ if ad_number:
             )
 
     else:
-        st.error("❌ AD not found. Please check the number exactly as it appears (e.g., 2020-06-14).")
+        st.error("❌ AD not found. Please check the number exactly as it appears (e.g., 2025-01-01).")
