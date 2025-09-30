@@ -27,7 +27,7 @@ st.set_page_config(page_title="FAA AD Compliance Checker", layout="centered")
 LOGO_URL = "https://www.ferasaviation.info/gallery/FA__logo.png?ts=1754692591"
 SITE_URL = "https://www.ferasaviation.info"
 
-# UI logo (unchanged)
+# UI logo
 st.image(LOGO_URL, width=180)
 st.markdown(f"[🌐 www.ferasaviation.info]({SITE_URL})")
 
@@ -101,31 +101,23 @@ LETTER_BLOCK_RE_TEMPLATE = r"""
     (                        # start capture of the body
         .*?
     )                        # end capture of the body
-    (?=                      # stop when we see the next lettered section like (d), (h), etc., or end of string
+    (?=                      # stop at next lettered section or end
         \n\(\s*[a-z]\s*\)\s*[^\n]*\n
         | \Z
     )
 """
 def slice_letter_block(full_text: str, letter: str) -> str | None:
-    """
-    Returns the text body that follows a header like '(c) ...' up to the next '(x) ...' header.
-    Works on plain text with newlines.
-    """
     if not full_text:
         return None
     t = full_text.replace("\u00a0", " ")
-    # normalize multiple spaces and ensure consistent newlines
     t = re.sub(r"\r\n?", "\n", t)
-    # Some pages may not have line breaks between header and first paragraph; help the regex:
-    # Insert a newline before '(' that starts a new section if it's adjacent to text.
+    # ensure a newline before each new "(x)" header to help slicing
     t = re.sub(r"(?<!\n)\(\s*([a-z])\s*\)", r"\n(\1)", t, flags=re.IGNORECASE)
-
     pat = LETTER_BLOCK_RE_TEMPLATE.format(letter=re.escape(letter))
     block_re = re.compile(pat, re.IGNORECASE | re.DOTALL | re.VERBOSE)
     m = block_re.search(t)
     if m:
         body = m.group(1).strip()
-        # Light cleanup: collapse too many blank lines
         body = re.sub(r"\n{3,}", "\n\n", body)
         return body if body else None
     return None
@@ -164,7 +156,7 @@ def fetch_ad_data(ad_number: str):
             if ad_number in title or "airworthiness directive" in title.lower():
                 return {
                     "title": title,
-                    "effective_date": doc.get("effective_on"),  # may already be YYYY-MM-DD
+                    "effective_date": doc.get("effective_on"),
                     "html_url": doc.get("html_url"),
                     "pdf_url": doc.get("pdf_url"),
                     "document_number": doc.get("document_number"),
@@ -188,14 +180,7 @@ def fetch_document_json(document_number: str) -> dict | None:
         return None
 
 def extract_effective_from_api_document(doc_json: dict, html_fallback_text: str | None = None) -> str | None:
-    """
-    Try to parse the effective date from:
-      1) 'dates' field
-      2) 'body_html_url' fetched HTML
-      3) abstract/excerpts/title
-      4) provided fallback text
-    Returns ISO YYYY-MM-DD if found.
-    """
+    """Parse effective date from dates/body_html_url/abstract/excerpts/title or fallback text."""
     if not doc_json:
         doc_json = {}
 
@@ -289,10 +274,8 @@ def extract_details(ad_html_url: str, api_doc: dict | None):
     if not sb_refs:
         sb_refs = find_sb_refs(full_text)
 
-    # Compliance Time: grab any section that starts with the word "Compliance"
+    # Compliance Time: try a block that contains "Compliance"
     compliance_text = None
-    # 1) Try to find a letter block whose header line contains "Compliance"
-    #    (coarse heuristic: search for a header line and capture body)
     m = re.search(
         r"\(\s*[a-z]\s*\)\s*[^\n]*\bCompliance\b[^\n]*\n(.*?)(?=\n\(\s*[a-z]\s*\)\s*[^\n]*\n|\Z)",
         full_text, flags=re.IGNORECASE | re.DOTALL
@@ -300,7 +283,6 @@ def extract_details(ad_html_url: str, api_doc: dict | None):
     if m:
         compliance_text = m.group(1).strip()
     if not compliance_text:
-        # 2) Fallback: first paragraph after any "Compliance" keyword
         m2 = re.search(r"\bCompliance\b[:.]?\s*(.+?)(?=\n{2,}|\Z)", full_text, flags=re.IGNORECASE | re.DOTALL)
         if m2:
             compliance_text = m2.group(1).strip()
@@ -428,55 +410,71 @@ def build_pdf_report(
     story.append(Paragraph(ct_text, normal))
     story.append(Spacer(1, 8))
 
+    # ------------------- Responsive Compliance Records Table -------------------
     story.append(Paragraph("Compliance Records", h2))
     records_list = records or []
     if not records_list:
         story.append(Paragraph("No compliance records added.", normal))
     else:
+        # Header
         header = [
             "Status", "Method", "Details",
             "Applicability (Aircraft/Component)", "Serials",
             "Date", "Hours", "Cycles", "Repetitive", "Interval", "Basis", "Next Due"
         ]
-        rows = [header]
+
+        from xml.sax.saxutils import escape as xml_escape
+        def P(text):
+            return Paragraph(xml_escape(str(text)) if text is not None else "", small)
+
+        rows = [[Paragraph(label, ParagraphStyle("th", parent=small, fontName="Helvetica-Bold")) for label in header]]
+
         for rec in records_list:
             next_due = rec.get("next_due") or {}
             if isinstance(next_due, dict):
-                nd_hours = next_due.get("hours")
-                nd_cycles = next_due.get("cycles")
-                nd_cal = next_due.get("calendar")
-                nd_text = ", ".join([str(x) for x in [f"H:{nd_hours}" if nd_hours is not None else None,
-                                                     f"C:{nd_cycles}" if nd_cycles is not None else None,
-                                                     nd_cal] if x])
+                nd_parts = []
+                if next_due.get("hours") is not None:  nd_parts.append(f"H:{next_due['hours']}")
+                if next_due.get("cycles") is not None: nd_parts.append(f"C:{next_due['cycles']}")
+                if next_due.get("calendar"):            nd_parts.append(next_due["calendar"])
+                nd_text = ", ".join(nd_parts)
             else:
                 nd_text = str(next_due)
 
             rows.append([
-                rec.get("status", ""),
-                "; ".join(rec.get("method", []) or []),
-                rec.get("method_other", ""),
-                rec.get("applic_aircraft", ""),
-                rec.get("applic_serials", ""),
-                rec.get("performed_date", ""),
-                str(rec.get("performed_hours", "")),
-                str(rec.get("performed_cycles", "")),
-                "Yes" if rec.get("repetitive") else "No",
-                (f"{rec.get('rep_interval_value','')} {rec.get('rep_interval_unit','')}".strip() if rec.get("repetitive") else ""),
-                (rec.get("rep_basis","") if rec.get("repetitive") else ""),
-                nd_text,
+                P(rec.get("status", "")),
+                P("; ".join(rec.get("method", []) or [])),
+                P(rec.get("method_other", "")),
+                P(rec.get("applic_aircraft", "")),
+                P(rec.get("applic_serials", "")),
+                P(rec.get("performed_date", "")),
+                P(rec.get("performed_hours", "")),
+                P(rec.get("performed_cycles", "")),
+                P("Yes" if rec.get("repetitive") else "No"),
+                P((f"{rec.get('rep_interval_value','')} {rec.get('rep_interval_unit','')}".strip()
+                   if rec.get("repetitive") else "")),
+                P((rec.get("rep_basis","") if rec.get("repetitive") else "")),
+                P(nd_text),
             ])
 
-        widths = [18*mm, 25*mm, 28*mm, 30*mm, 28*mm, 18*mm, 14*mm, 14*mm, 16*mm, 20*mm, 20*mm, 26*mm]
-        table = Table(rows, colWidths=widths, repeatRows=1)
+        # Proportional widths that fit within the printable width
+        weights = [8, 12, 14, 14, 12, 8, 6, 6, 8, 10, 10, 12]
+        total = sum(weights)
+        avail = doc.width
+        col_widths = [avail * w / total for w in weights]
+
+        table = Table(rows, colWidths=col_widths, repeatRows=1, hAlign="LEFT")
         table.setStyle(TableStyle([
             ("BACKGROUND", (0,0), (-1,0), colors.lightgrey),
             ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-            ("FONTSIZE", (0,0), (-1,-1), 9),
-            ("BOX", (0,0), (-1,-1), 0.5, colors.grey),
+            ("FONTSIZE",  (0,0), (-1,-1), 9),
+            ("VALIGN",    (0,0), (-1,-1), "TOP"),
+            ("LINEABOVE", (0,0), (-1,0),  0.5, colors.grey),
+            ("LINEBELOW", (0,0), (-1,-1), 0.25, colors.grey),
+            ("BOX",       (0,0), (-1,-1), 0.5, colors.grey),
             ("INNERGRID", (0,0), (-1,-1), 0.25, colors.grey),
-            ("VALIGN", (0,0), (-1,-1), "TOP"),
         ]))
         story.append(table)
+    # --------------------------------------------------------------------------
 
     story.append(Spacer(1, 12))
     story.append(Paragraph("Generated by Feras Aviation AD Compliance Checker", small))
@@ -493,7 +491,7 @@ if ad_number:
         data = fetch_ad_data(ad_number)
 
     if data:
-        data["ad_number"] = ad_number  # ensure it appears in PDF
+        data["ad_number"] = ad_number
         st.success(f"✅ Found: {data['title']}")
         st.write(f"**AD Number:** {ad_number}")
         st.write(f"**Document Number:** {data['document_number']}")
@@ -505,7 +503,7 @@ if ad_number:
         # Per-document JSON (for dates + body_html_url)
         api_doc = fetch_document_json(data.get("document_number"))
 
-        # Extract section details using the new slicers
+        # Extract section details
         with st.spinner("📄 Extracting AD details..."):
             details = extract_details(data['html_url'], api_doc)
 
@@ -607,7 +605,7 @@ if ad_number:
                 "rep_basis": rep_basis if rep else None,
             }
 
-            # Compute a simple "Next Due" for hours/cycles; store calendar as a definition
+            # Simple "Next Due"
             next_due = {}
             if rep:
                 if rep_interval_unit == "hours" and record.get("performed_hours") is not None:
