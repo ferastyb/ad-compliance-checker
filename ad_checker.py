@@ -57,12 +57,11 @@ EFFECTIVE_SENTENCE_RE = re.compile(
     r"(?:This\s*)?AD(?:\s+\d{4}-\d{2}-\d{2})?\s*(?:\([^)]*\))?\s*(?:is|becomes)\s*effective(?:\s+on)?\s*\(?\s*([A-Za-z]+ \d{1,2}, \d{4})\s*\)?",
     re.IGNORECASE | re.DOTALL
 )
-# Generic Month DD, YYYY capture (used in proximity fallback)
 MONTH_DATE_RE = re.compile(r"\b([A-Za-z]+ \d{1,2}, \d{4})\b")
 
 def _normalize_date(date_str: str) -> str | None:
     try:
-        return datetime.strptime(date_str.strip(), "%B %d, %Y").date().isoformat()
+        return datetime.strptime(date_str.strip(), "%B %d, %Y").date().isoformat()  # YYYY-MM-DD
     except Exception:
         return None
 
@@ -70,6 +69,7 @@ def extract_effective_date_from_text(text: str) -> str | None:
     """
     1) Try robust regex for “AD ... is/becomes effective (on) Month DD, YYYY”.
     2) Proximity fallback: find 'effective' then scan next ~180 chars for Month DD, YYYY.
+    Returns ISO YYYY-MM-DD when found.
     """
     if not text:
         return None
@@ -88,6 +88,23 @@ def extract_effective_date_from_text(text: str) -> str | None:
             if norm:
                 return norm
     return None
+
+def to_ddmmyyyy(date_str: str | None) -> str | None:
+    """Flip YYYY-MM-DD (or Month DD, YYYY) to DD-MM-YYYY for display/PDF. If parsing fails, return original."""
+    if not date_str:
+        return None
+    # Try ISO first
+    try:
+        dt = datetime.strptime(date_str[:10], "%Y-%m-%d")
+        return dt.strftime("%d-%m-%Y")
+    except Exception:
+        pass
+    # Try Month DD, YYYY if ever passed through un-normalized
+    try:
+        dt = datetime.strptime(date_str.strip(), "%B %d, %Y")
+        return dt.strftime("%d-%m-%Y")
+    except Exception:
+        return date_str  # fallback: show as-is
 
 # -----------------------------
 # Data fetchers
@@ -112,7 +129,7 @@ def fetch_ad_data(ad_number: str):
             if ad_number in title or "airworthiness directive" in title.lower():
                 return {
                     "title": title,
-                    "effective_date": doc.get("effective_on"),
+                    "effective_date": doc.get("effective_on"),  # may already be YYYY-MM-DD
                     "html_url": doc.get("html_url"),
                     "pdf_url": doc.get("pdf_url"),
                     "document_number": doc.get("document_number"),
@@ -142,22 +159,21 @@ def fetch_document_json(document_number: str) -> dict | None:
 def extract_effective_from_api_document(doc_json: dict, html_fallback_text: str | None = None) -> str | None:
     """
     Try to parse the effective date from the per-document JSON:
-      1) 'dates' field (most reliable for the "DATES:" section)
+      1) 'dates' field (most reliable for “DATES: This AD is effective …”)
       2) fetch and parse 'body_html_url'
       3) scan other text-y fields (abstract, excerpts, title)
       4) use provided fallback text (from page HTML) as last resort
+    Returns ISO YYYY-MM-DD if found.
     """
     if not doc_json:
         doc_json = {}
 
-    # 1) DATES field often contains: "DATES: This AD is effective March 11, 2025."
     dates_field = doc_json.get("dates")
     if isinstance(dates_field, str) and dates_field.strip():
         found = extract_effective_date_from_text(dates_field)
         if found:
             return found
 
-    # 2) body_html_url can be fetched and parsed
     body_html_url = doc_json.get("body_html_url")
     if body_html_url:
         try:
@@ -170,7 +186,6 @@ def extract_effective_from_api_document(doc_json: dict, html_fallback_text: str 
         except Exception:
             pass
 
-    # 3) other candidates (abstract, excerpts, title)
     candidates = []
     for key in ("abstract", "excerpts", "title"):
         val = doc_json.get(key)
@@ -185,7 +200,6 @@ def extract_effective_from_api_document(doc_json: dict, html_fallback_text: str 
         if found:
             return found
 
-    # 4) fallback from caller (page HTML)
     if html_fallback_text:
         return extract_effective_date_from_text(html_fallback_text)
 
@@ -311,7 +325,7 @@ def build_pdf_report(
         ["Document Number", ad_data.get("document_number") or ""],
         ["AD Title", ad_data.get("title") or ""],
         ["Publication Date", ad_data.get("publication_date") or "N/A"],
-        ["Effective Date", ad_data.get("effective_date") or "N/A"],
+        ["Effective Date", ad_data.get("effective_date") or "N/A"],  # already dd-mm-yyyy
         ["Customer", customer or ""],
         ["Aircraft", aircraft or ""],
     ]
@@ -411,7 +425,7 @@ if ad_number:
         st.write(f"**AD Number:** {ad_number}")
         st.write(f"**Document Number:** {data['document_number']}")
         st.write(f"**Publication Date:** {data.get('publication_date') or 'N/A'}")
-        st.write(f"**Effective Date (API field):** {data.get('effective_date') or 'N/A'}")
+        st.write(f"**Effective Date (API field):** {to_ddmmyyyy(data.get('effective_date')) or 'N/A'}")
         st.markdown(f"[🔗 View Full AD (HTML)]({data['html_url']})")
         st.markdown(f"[📄 View PDF]({data['pdf_url']})")
 
@@ -421,25 +435,28 @@ if ad_number:
         # Fetch per-document JSON (contains 'dates', 'body_html_url', etc.)
         api_doc = fetch_document_json(data.get("document_number"))
 
-        # Resolve effective date:
+        # Resolve effective date as ISO first:
         # 1) API 'effective_on' if present and not "N/A"
-        # 2) API 'dates' text and/or 'body_html_url'
-        # 3) HTML fallback (page text)
-        api_eff_field = (data.get("effective_date") or "").strip()
-        effective_resolved = api_eff_field if api_eff_field and api_eff_field.upper() != "N/A" else None
+        # 2) API 'dates'/body_html_url
+        # 3) HTML fallback
+        api_eff_field_iso = (data.get("effective_date") or "").strip()
+        effective_resolved_iso = api_eff_field_iso if api_eff_field_iso and api_eff_field_iso.upper() != "N/A" else None
 
-        if not effective_resolved:
-            effective_resolved = extract_effective_from_api_document(
+        if not effective_resolved_iso:
+            effective_resolved_iso = extract_effective_from_api_document(
                 api_doc,
                 html_fallback_text=details.get("_full_html_text", "")
             )
 
-        st.subheader("📅 Effective Date")
-        st.write(effective_resolved or api_eff_field or "N/A")
+        # Flip to dd-mm-yyyy for display & PDF
+        eff_display = to_ddmmyyyy(effective_resolved_iso) or to_ddmmyyyy(api_eff_field_iso)
 
-        # Ensure the PDF uses the resolved value if we found one
-        if effective_resolved:
-            data["effective_date"] = effective_resolved
+        st.subheader("📅 Effective Date")
+        st.write(eff_display or "N/A")
+
+        # Ensure the PDF uses the flipped value
+        if eff_display:
+            data["effective_date"] = eff_display
 
         st.subheader("🛩️ Affected Aircraft / SB References")
         st.write(details['affected_aircraft'])
@@ -580,13 +597,12 @@ if ad_number:
         if REPORTLAB_AVAILABLE:
             if st.button("Generate PDF"):
                 try:
-                    # Pull Aircraft from the most recent "Serials / MSN / PNs"
                     aircraft_for_report = ""
                     if st.session_state["compliance_records"]:
                         aircraft_for_report = st.session_state["compliance_records"][-1].get("applic_serials", "") or ""
 
                     pdf_bytes = build_pdf_report(
-                        ad_data=data,                  # includes ad_number & resolved effective date
+                        ad_data=data,                  # includes dd-mm-yyyy effective date now
                         details=details,
                         records=st.session_state["compliance_records"],
                         logo_url=LOGO_URL,
