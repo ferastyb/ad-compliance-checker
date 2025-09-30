@@ -95,7 +95,7 @@ def to_ddmmyyyy(date_str: str | None) -> str | None:
 # Robust text slicers for (letter) sections
 # -----------------------------
 LETTER_BLOCK_RE_TEMPLATE = r"""
-    \(\s*{letter}\s*\)       # (c), (d), (g)...
+    \(\s*{letter}\s*\)       # (c), (d), (g), (h)...
     [^\n]*?                  # header line (title etc.), non-greedy
     \n?                      # optional newline
     (                        # capture the body
@@ -154,7 +154,7 @@ def detect_ata_from_subject(full_text: str) -> str | None:
         return m.group(1)
     return None
 
-# Fallback detector (kept, but used only if Subject didn’t yield)
+# Fallback detector (used only if Subject didn’t yield)
 ATA_DIRECT_RE = re.compile(
     r"\b(?:ATA|ATA\s*chapter|chapter\s*(?:ATA)?)\s*[-:]?\s*(\d{2})(?:[.\- ]?(\d{2}))?\b",
     re.IGNORECASE
@@ -177,21 +177,18 @@ def detect_ata_fallback(full_text: str, sb_refs: list[str] | None = None) -> str
         return None
     t = full_text.replace("\u00a0", " ")
 
-    # direct "ATA 25", etc.
     cands = [m.group(1) if not m.group(2) else f"{m.group(1)}-{m.group(2)}"
              for m in ATA_DIRECT_RE.finditer(t)]
     if cands:
         from collections import Counter
         return Counter(cands).most_common(1)[0][0]
 
-    # look inside SB refs
     if sb_refs:
         for ref in sb_refs:
             m = re.search(r"-(\d{2})-", ref)
             if m:
                 return m.group(1)
 
-    # keyword hint
     tl = t.lower()
     for pat, code in ATA_KEYWORD_HINTS:
         if re.search(pat, tl):
@@ -293,6 +290,7 @@ def extract_details(ad_html_url: str, api_doc: dict | None):
     Returns dict with:
       - affected_aircraft (from (c) block)
       - required_actions (from (g) block)
+      - exceptions (from (h) block)
       - compliance_times (best-effort)
       - sb_references (from (g) first, else global)
       - _full_html_text
@@ -323,14 +321,16 @@ def extract_details(ad_html_url: str, api_doc: dict | None):
             return {
                 "affected_aircraft": f"Error extracting: {e}",
                 "required_actions": "N/A",
+                "exceptions": "N/A",
                 "compliance_times": "N/A",
                 "sb_references": [],
                 "_full_html_text": "",
             }
 
-    # Slice (c) and (g) letter blocks from the plain text
+    # Slice key letter blocks from the plain text
     applic_text = slice_letter_block(full_text, "c")
     req_actions_text = slice_letter_block(full_text, "g")
+    exceptions_text = slice_letter_block(full_text, "h")
 
     # SB refs: prefer from (g) block; else scan whole doc
     sb_refs = find_sb_refs(req_actions_text) if req_actions_text else []
@@ -353,6 +353,7 @@ def extract_details(ad_html_url: str, api_doc: dict | None):
     return {
         "affected_aircraft": (applic_text or "N/A"),
         "required_actions": (req_actions_text or "N/A"),
+        "exceptions": (exceptions_text or "N/A"),
         "compliance_times": (compliance_text or "N/A"),
         "sb_references": sb_refs,
         "_full_html_text": full_text,
@@ -465,10 +466,19 @@ def build_pdf_report(
     story.append(Paragraph(", ".join(sb_list) if sb_list else "N/A", normal))
     story.append(Spacer(1, 8))
 
-    story.append(Paragraph("Required Actions (raw section)", h3))
-    ra_text = (details.get("required_actions") or "").replace("\n", "<br/>") or "N/A"
-    story.append(Paragraph(ra_text, normal))
+    # -------- Required Actions + Exceptions (g + h) --------
+    story.append(Paragraph("Required Actions", h3))
+    ra_text = (details.get("required_actions") or "").strip()
+    ex_text = (details.get("exceptions") or "").strip()
+    parts = []
+    if ra_text and ra_text.upper() != "N/A":
+        parts.append(f"<b>(g) Required Actions</b><br/>{ra_text.replace('\n','<br/>')}")
+    if ex_text and ex_text.upper() != "N/A":
+        parts.append(f"<br/><b>(h) Exceptions to Service Information Specifications</b><br/>{ex_text.replace('\n','<br/>')}")
+    combined = "<br/><br/>".join(parts) if parts else "N/A"
+    story.append(Paragraph(combined, normal))
     story.append(Spacer(1, 8))
+    # -------------------------------------------------------
 
     story.append(Paragraph("Compliance Deadlines", h3))
     ct_text = (details.get("compliance_times") or "").replace("\n", "<br/>") or "N/A"
@@ -614,6 +624,9 @@ if ad_number:
 
         st.subheader("🔧 Required Actions (raw section)")
         st.write(details.get("required_actions") or "N/A")
+
+        st.subheader("📌 Exceptions to Service Information Specifications")
+        st.write(details.get("exceptions") or "N/A")
 
         st.subheader("📅 Compliance Deadlines")
         st.write(details.get("compliance_times") or "N/A")
