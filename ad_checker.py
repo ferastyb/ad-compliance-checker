@@ -43,6 +43,11 @@ if "compliance_records" not in st.session_state:
 ad_number = st.text_input("Enter AD Number (e.g., 2025-01-01):").strip()
 customer_for_report = st.text_input("Customer (for report):").strip()
 
+# Optional stamp inputs (use either)
+st.markdown("**PDF Stamp (optional)**")
+stamp_file = st.file_uploader("Upload stamp image (PNG/JPG)", type=["png", "jpg", "jpeg"])
+stamp_path_or_url = st.text_input("Or paste a stamp file path / URL (optional)").strip()
+
 # -----------------------------
 # Effective Date Utilities
 # -----------------------------
@@ -54,7 +59,7 @@ MONTH_DATE_RE = re.compile(r"\b([A-Za-z]+ \d{1,2}, \d{4})\b")
 
 def _normalize_date(date_str: str) -> str | None:
     try:
-        return datetime.strptime(date_str.strip(), "%B %d, %Y").date().isoformat()  # YYYY-MM-DD
+        return datetime.strptime(date_str.strip(), "%B %d, %Y").date().isoformat()
     except Exception:
         return None
 
@@ -96,7 +101,7 @@ def to_ddmmyyyy(date_str: str | None) -> str | None:
 # -----------------------------
 LETTER_BLOCK_RE_TEMPLATE = r"""
     \(\s*{letter}\s*\)       # (c), (d), (g), (h)...
-    [^\n]*?                  # header line (title etc.), non-greedy
+    [^\n]*?                  # header line
     \n?                      # optional newline
     (                        # capture the body
         .*?
@@ -111,7 +116,6 @@ def slice_letter_block(full_text: str, letter: str) -> str | None:
         return None
     t = full_text.replace("\u00a0", " ")
     t = re.sub(r"\r\n?", "\n", t)
-    # ensure a newline before each "(x)" header to help slicing
     t = re.sub(r"(?<!\n)\(\s*([a-z])\s*\)", r"\n(\1)", t, flags=re.IGNORECASE)
     pat = LETTER_BLOCK_RE_TEMPLATE.format(letter=re.escape(letter))
     block_re = re.compile(pat, re.IGNORECASE | re.DOTALL | re.VERBOSE)
@@ -123,7 +127,6 @@ def slice_letter_block(full_text: str, letter: str) -> str | None:
     return None
 
 SB_CODE_RE = re.compile(r"\b[A-Z0-9]+(?:-[A-Z0-9]+)*-SB[0-9A-Z]+(?:-[0-9A-Z]+)*\b", re.IGNORECASE)
-
 def find_sb_refs(text: str) -> list[str]:
     if not text:
         return []
@@ -136,16 +139,13 @@ def find_sb_refs(text: str) -> list[str]:
     return out
 
 # -----------------------------
-# ATA Chapter detection
+# ATA Chapter detection (from (d) Subject first)
 # -----------------------------
-# Precise ATA from (d) Subject
 ATA_FROM_SUBJECT_RE = re.compile(
     r"\b(?:JASC\/)?ATA(?:\s*chapter)?\s*[:\-]?\s*(\d{2})(?:[.\- ]?\d{2})?\b",
     re.IGNORECASE
 )
-
 def detect_ata_from_subject(full_text: str) -> str | None:
-    """Pull ATA from the (d) Subject block if present."""
     subj = slice_letter_block(full_text, "d")
     if not subj:
         return None
@@ -154,7 +154,6 @@ def detect_ata_from_subject(full_text: str) -> str | None:
         return m.group(1)
     return None
 
-# Fallback detector (used only if Subject didn’t yield)
 ATA_DIRECT_RE = re.compile(
     r"\b(?:ATA|ATA\s*chapter|chapter\s*(?:ATA)?)\s*[-:]?\s*(\d{2})(?:[.\- ]?(\d{2}))?\b",
     re.IGNORECASE
@@ -171,24 +170,20 @@ ATA_KEYWORD_HINTS = [
     (r"\blanding gear\b", "32"),
     (r"\bair conditioning\b", "21"),
 ]
-
 def detect_ata_fallback(full_text: str, sb_refs: list[str] | None = None) -> str | None:
     if not full_text:
         return None
     t = full_text.replace("\u00a0", " ")
-
     cands = [m.group(1) if not m.group(2) else f"{m.group(1)}-{m.group(2)}"
              for m in ATA_DIRECT_RE.finditer(t)]
     if cands:
         from collections import Counter
         return Counter(cands).most_common(1)[0][0]
-
     if sb_refs:
         for ref in sb_refs:
             m = re.search(r"-(\d{2})-", ref)
             if m:
                 return m.group(1)
-
     tl = t.lower()
     for pat, code in ATA_KEYWORD_HINTS:
         if re.search(pat, tl):
@@ -199,7 +194,6 @@ def detect_ata_fallback(full_text: str, sb_refs: list[str] | None = None) -> str
 # Data fetchers
 # -----------------------------
 def fetch_ad_data(ad_number: str):
-    """Search the Federal Register API for an AD by number and return core metadata."""
     base_url = "https://www.federalregister.gov/api/v1/documents.json"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
@@ -227,7 +221,6 @@ def fetch_ad_data(ad_number: str):
     return None
 
 def fetch_document_json(document_number: str) -> dict | None:
-    """Fetch the per-document JSON payload (contains 'dates', 'body_html_url', etc.)."""
     if not document_number:
         return None
     url = f"https://www.federalregister.gov/api/v1/documents/{document_number}.json"
@@ -240,7 +233,6 @@ def fetch_document_json(document_number: str) -> dict | None:
         return None
 
 def extract_effective_from_api_document(doc_json: dict, html_fallback_text: str | None = None) -> str | None:
-    """Parse effective date from dates/body_html_url/abstract/excerpts/title or fallback text."""
     if not doc_json:
         doc_json = {}
 
@@ -285,16 +277,6 @@ def extract_effective_from_api_document(doc_json: dict, html_fallback_text: str 
 # Section details extractor
 # -----------------------------
 def extract_details(ad_html_url: str, api_doc: dict | None):
-    """
-    Prefer the API's 'body_html_url' content; fall back to the public HTML page.
-    Returns dict with:
-      - affected_aircraft (from (c) block)
-      - required_actions (from (g) block)
-      - exceptions (from (h) block)
-      - compliance_times (best-effort)
-      - sb_references (from (g) first, else global)
-      - _full_html_text
-    """
     headers = {"User-Agent": "Mozilla/5.0"}
     full_text = ""
 
@@ -327,17 +309,17 @@ def extract_details(ad_html_url: str, api_doc: dict | None):
                 "_full_html_text": "",
             }
 
-    # Slice key letter blocks from the plain text
+    # Slice key letter blocks
     applic_text = slice_letter_block(full_text, "c")
     req_actions_text = slice_letter_block(full_text, "g")
     exceptions_text = slice_letter_block(full_text, "h")
 
-    # SB refs: prefer from (g) block; else scan whole doc
+    # SB refs
     sb_refs = find_sb_refs(req_actions_text) if req_actions_text else []
     if not sb_refs:
         sb_refs = find_sb_refs(full_text)
 
-    # Compliance Time: try a block that contains "Compliance"
+    # Compliance Time
     compliance_text = None
     m = re.search(
         r"\(\s*[a-z]\s*\)\s*[^\n]*\bCompliance\b[^\n]*\n(.*?)(?=\n\(\s*[a-z]\s*\)\s*[^\n]*\n|\Z)",
@@ -360,6 +342,31 @@ def extract_details(ad_html_url: str, api_doc: dict | None):
     }
 
 # -----------------------------
+# Helper: build an Image flowable from bytes/path/url
+# -----------------------------
+def _image_flowable_from_source(source_bytes: bytes | None = None, path_or_url: str | None = None,
+                                width_mm: float | None = None, height_mm: float | None = None):
+    """
+    Returns a ReportLab Image() flowable or None.
+    If width_mm is provided (and height_mm is None), scales proportionally to width.
+    """
+    try:
+        if source_bytes:
+            bio = io.BytesIO(source_bytes)
+            return Image(bio, width=width_mm*mm if width_mm else None, height=height_mm*mm if height_mm else None)
+        if path_or_url:
+            if path_or_url.lower().startswith(("http://", "https://")):
+                resp = requests.get(path_or_url, timeout=10)
+                resp.raise_for_status()
+                bio = io.BytesIO(resp.content)
+                return Image(bio, width=width_mm*mm if width_mm else None, height=height_mm*mm if height_mm else None)
+            else:
+                return Image(path_or_url, width=width_mm*mm if width_mm else None, height=height_mm*mm if height_mm else None)
+    except Exception:
+        return None
+    return None
+
+# -----------------------------
 # PDF report builder
 # -----------------------------
 def build_pdf_report(
@@ -370,7 +377,9 @@ def build_pdf_report(
     site_url: str,
     customer: str,
     aircraft: str,
-    ata_chapter: str | None
+    ata_chapter: str | None,
+    stamp_bytes: bytes | None = None,
+    stamp_path_or_url: str | None = None
 ) -> bytes:
     if not REPORTLAB_AVAILABLE:
         raise RuntimeError("ReportLab is not installed. Add 'reportlab' to your requirements.txt.")
@@ -466,7 +475,7 @@ def build_pdf_report(
     story.append(Paragraph(", ".join(sb_list) if sb_list else "N/A", normal))
     story.append(Spacer(1, 8))
 
-    # -------- Required Actions + Exceptions (g + h) --------
+    # Required Actions + Exceptions
     story.append(Paragraph("Required Actions", h3))
     ra_text = (details.get("required_actions") or "").strip()
     ex_text = (details.get("exceptions") or "").strip()
@@ -478,7 +487,6 @@ def build_pdf_report(
     combined = "<br/><br/>".join(parts) if parts else "N/A"
     story.append(Paragraph(combined, normal))
     story.append(Spacer(1, 8))
-    # -------------------------------------------------------
 
     story.append(Paragraph("Compliance Deadlines", h3))
     ct_text = (details.get("compliance_times") or "").replace("\n", "<br/>") or "N/A"
@@ -549,8 +557,19 @@ def build_pdf_report(
         story.append(table)
     # --------------------------------------------------------------------------
 
-    story.append(Spacer(1, 12))
+    story.append(Spacer(1, 18))
     story.append(Paragraph("Generated by Feras Aviation AD Compliance Checker", small))
+
+    # ---- Stamp at end (centered) ----
+    stamp_flowable = _image_flowable_from_source(
+        source_bytes=stamp_bytes,
+        path_or_url=stamp_path_or_url,
+        width_mm=60  # adjust size here
+    )
+    if stamp_flowable:
+        story.append(Spacer(1, 18))
+        story.append(stamp_flowable)
+    # ---------------------------------
 
     doc.build(story)
     buf.seek(0)
@@ -765,6 +784,9 @@ if ad_number:
                     if st.session_state["compliance_records"]:
                         aircraft_for_report = st.session_state["compliance_records"][-1].get("applic_serials", "") or ""
 
+                    # Load stamp bytes if uploaded
+                    stamp_bytes = stamp_file.read() if stamp_file is not None else None
+
                     pdf_bytes = build_pdf_report(
                         ad_data=data,
                         details=details,
@@ -773,7 +795,9 @@ if ad_number:
                         site_url=SITE_URL,
                         customer=customer_for_report,
                         aircraft=aircraft_for_report,
-                        ata_chapter=ata_chapter if ata_chapter else detected_ata
+                        ata_chapter=ata_chapter if ata_chapter else detected_ata,
+                        stamp_bytes=stamp_bytes,
+                        stamp_path_or_url=stamp_path_or_url if stamp_bytes is None else None
                     )
                     st.download_button(
                         "Download AD Report (PDF)",
