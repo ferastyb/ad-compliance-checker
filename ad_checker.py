@@ -92,15 +92,15 @@ def to_ddmmyyyy(date_str: str | None) -> str | None:
         return date_str
 
 # -----------------------------
-# New: Robust text slicers for (c) and (g) sections
+# Robust text slicers for (letter) sections
 # -----------------------------
 LETTER_BLOCK_RE_TEMPLATE = r"""
-    \(\s*{letter}\s*\)       # (c) or (g)
-    [^\n]*?                  # the header line (title etc.), non-greedy
+    \(\s*{letter}\s*\)       # (c), (d), (g)...
+    [^\n]*?                  # header line (title etc.), non-greedy
     \n?                      # optional newline
-    (                        # start capture of the body
+    (                        # capture the body
         .*?
-    )                        # end capture of the body
+    )
     (?=                      # stop at next lettered section or end
         \n\(\s*[a-z]\s*\)\s*[^\n]*\n
         | \Z
@@ -111,7 +111,7 @@ def slice_letter_block(full_text: str, letter: str) -> str | None:
         return None
     t = full_text.replace("\u00a0", " ")
     t = re.sub(r"\r\n?", "\n", t)
-    # ensure a newline before each new "(x)" header to help slicing
+    # ensure a newline before each "(x)" header to help slicing
     t = re.sub(r"(?<!\n)\(\s*([a-z])\s*\)", r"\n(\1)", t, flags=re.IGNORECASE)
     pat = LETTER_BLOCK_RE_TEMPLATE.format(letter=re.escape(letter))
     block_re = re.compile(pat, re.IGNORECASE | re.DOTALL | re.VERBOSE)
@@ -138,12 +138,27 @@ def find_sb_refs(text: str) -> list[str]:
 # -----------------------------
 # ATA Chapter detection
 # -----------------------------
+# Precise ATA from (d) Subject
+ATA_FROM_SUBJECT_RE = re.compile(
+    r"\b(?:JASC\/)?ATA(?:\s*chapter)?\s*[:\-]?\s*(\d{2})(?:[.\- ]?\d{2})?\b",
+    re.IGNORECASE
+)
+
+def detect_ata_from_subject(full_text: str) -> str | None:
+    """Pull ATA from the (d) Subject block if present."""
+    subj = slice_letter_block(full_text, "d")
+    if not subj:
+        return None
+    m = ATA_FROM_SUBJECT_RE.search(subj)
+    if m:
+        return m.group(1)
+    return None
+
+# Fallback detector (kept, but used only if Subject didn’t yield)
 ATA_DIRECT_RE = re.compile(
     r"\b(?:ATA|ATA\s*chapter|chapter\s*(?:ATA)?)\s*[-:]?\s*(\d{2})(?:[.\- ]?(\d{2}))?\b",
     re.IGNORECASE
 )
-
-# very light keyword fallback if explicit "ATA 27" isn't present
 ATA_KEYWORD_HINTS = [
     (r"\bflight controls?\b", "27"),
     (r"\bfuel\b", "28"),
@@ -157,39 +172,30 @@ ATA_KEYWORD_HINTS = [
     (r"\bair conditioning\b", "21"),
 ]
 
-def detect_ata_chapter(full_text: str, sb_refs: list[str] | None = None) -> str | None:
+def detect_ata_fallback(full_text: str, sb_refs: list[str] | None = None) -> str | None:
     if not full_text:
         return None
     t = full_text.replace("\u00a0", " ")
 
-    # 1) Direct matches like "ATA 27", "ATA chapter 27-10"
-    candidates = []
-    for m in ATA_DIRECT_RE.finditer(t):
-        major = m.group(1)
-        minor = m.group(2)
-        if minor:
-            candidates.append(f"{major}-{minor}")
-        else:
-            candidates.append(major)
-    if candidates:
-        # choose the shortest (prefer major) most frequent
+    # direct "ATA 25", etc.
+    cands = [m.group(1) if not m.group(2) else f"{m.group(1)}-{m.group(2)}"
+             for m in ATA_DIRECT_RE.finditer(t)]
+    if cands:
         from collections import Counter
-        c = Counter(candidates)
-        return c.most_common(1)[0][0]
+        return Counter(cands).most_common(1)[0][0]
 
-    # 2) If SB refs contain patterns like "...-XX-..." (not common, but try)
+    # look inside SB refs
     if sb_refs:
         for ref in sb_refs:
             m = re.search(r"-(\d{2})-", ref)
             if m:
                 return m.group(1)
 
-    # 3) Keyword hints
+    # keyword hint
     tl = t.lower()
     for pat, code in ATA_KEYWORD_HINTS:
         if re.search(pat, tl):
             return code
-
     return None
 
 # -----------------------------
@@ -475,7 +481,6 @@ def build_pdf_report(
     if not records_list:
         story.append(Paragraph("No compliance records added.", normal))
     else:
-        # Header
         header = [
             "Status", "Method", "Details",
             "Applicability (Aircraft/Component)", "Serials",
@@ -515,7 +520,6 @@ def build_pdf_report(
                 P(nd_text),
             ])
 
-        # Proportional widths that fit within the printable width
         weights = [8, 12, 14, 14, 12, 8, 6, 6, 8, 10, 10, 12]
         total = sum(weights)
         avail = doc.width
@@ -561,7 +565,6 @@ if ad_number:
             st.write(f"**Effective Date (API field):** {to_ddmmyyyy(data.get('effective_date')) or 'N/A'}")
         with col_right:
             st.markdown("<div style='text-align:right;font-weight:600;'>ATA Chapter</div>", unsafe_allow_html=True)
-            # placeholder, filled once we parse details below
             ata_input_placeholder = st.empty()
 
         st.markdown(f"[🔗 View Full AD (HTML)]({data['html_url']})")
@@ -574,8 +577,11 @@ if ad_number:
         with st.spinner("📄 Extracting AD details..."):
             details = extract_details(data['html_url'], api_doc)
 
-        # Detect ATA
-        detected_ata = detect_ata_chapter(details.get("_full_html_text",""), details.get("sb_references"))
+        # Detect ATA: Subject-first, then fallback
+        detected_ata = detect_ata_from_subject(details.get("_full_html_text",""))
+        if not detected_ata:
+            detected_ata = detect_ata_fallback(details.get("_full_html_text",""), details.get("sb_references"))
+
         with col_right:
             ata_chapter = ata_input_placeholder.text_input(
                 label="ATA Chapter (editable)",
@@ -754,7 +760,7 @@ if ad_number:
                         site_url=SITE_URL,
                         customer=customer_for_report,
                         aircraft=aircraft_for_report,
-                        ata_chapter=ata_chapter if ata_chapter else detect_ata_chapter(details.get("_full_html_text",""), details.get("sb_references"))
+                        ata_chapter=ata_chapter if ata_chapter else detected_ata
                     )
                     st.download_button(
                         "Download AD Report (PDF)",
