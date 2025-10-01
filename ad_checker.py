@@ -15,6 +15,7 @@ try:
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import mm
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
+    from reportlab.lib import colors
     REPORTLAB_AVAILABLE = True
 except Exception:
     REPORTLAB_AVAILABLE = False
@@ -137,6 +138,75 @@ def find_sb_refs(text: str) -> list[str]:
             seen.add(r)
             out.append(r)
     return out
+
+# -----------------------------
+# NEW: Bullet summarizer for (g) and (h)
+# -----------------------------
+def summarize_to_bullets(text: str | None, max_items: int = 8) -> list[str]:
+    """
+    Create concise bullet points from an AD paragraph.
+    - If the text already has numbered/lettered items, extract those.
+    - Otherwise, split into sentences and keep the most action-heavy lines.
+    """
+    if not text or text.strip().upper() == "N/A":
+        return []
+
+    t = text.replace("\u00a0", " ").strip()
+
+    # 1) Prefer explicit list items (1., (1), a.), etc.
+    items = []
+    for line in t.splitlines():
+        m = re.match(r"^\s*(?:\(?\d+\)|\d+\.)\s+(.*)$", line.strip())
+        if not m:
+            m = re.match(r"^\s*(?:\(?[a-zA-Z]\)|[a-zA-Z]\.)\s+(.*)$", line.strip())
+        if m:
+            item = m.group(1).strip().rstrip(";:,")
+            if len(item) > 2:
+                items.append(item)
+
+    if items:
+        # Keep the first clause per item to make bullets punchy
+        clean = []
+        for it in items:
+            part = re.split(r"(?<=[.;:])\s+", it)[0]
+            clean.append(part)
+        seen, out = set(), []
+        for c in clean:
+            key = c.lower()
+            if key not in seen:
+                seen.add(key); out.append(c)
+        return out[:max_items]
+
+    # 2) Otherwise, score sentences by action keywords
+    sentences = re.split(r'(?<=[.!?])\s+', t)
+    keywords = [
+        "inspect", "replace", "modify", "repair", "remove", "install",
+        "before", "after", "within", "until", "thereafter", "repeat",
+        "prohibit", "comply", "in accordance", "per", "service bulletin",
+        "amm", "stc", "amoc", "der", "except", "unless"
+    ]
+    ranked = []
+    for s in sentences:
+        s_clean = s.strip().rstrip(";")
+        if not s_clean:
+            continue
+        score = sum(1 for k in keywords if k in s_clean.lower())
+        if re.match(r"^(inspect|replace|modify|repair|remove|install|revise|accomplish)\b", s_clean.lower()):
+            score += 2
+        ranked.append((score, s_clean))
+
+    ranked.sort(key=lambda x: (-x[0], len(x[1])))
+    bullets = [s for score, s in ranked if score > 0][:max_items]
+
+    if not bullets:
+        bullets = sentences[: min(max_items, 5)]
+
+    seen, out = set(), []
+    for b in bullets:
+        key = b.lower()
+        if key not in seen:
+            seen.add(key); out.append(b)
+    return out[:max_items]
 
 # -----------------------------
 # ATA Chapter detection (from (d) Subject first)
@@ -426,7 +496,6 @@ def build_pdf_report(
     )
 
     styles = getSampleStyleSheet()
-    from reportlab.lib import colors
     h1 = styles["Heading1"]
     h2 = styles["Heading2"]
     h3 = styles["Heading3"]
@@ -483,7 +552,29 @@ def build_pdf_report(
     story.append(Paragraph(", ".join(sb_list) if sb_list else "N/A", normal))
     story.append(Spacer(1, 8))
 
-    # Required Actions + Exceptions
+    # --- New: Bullet summaries for (g) and (h) ---
+    story.append(Paragraph("Action Items (Summarized)", h3))
+
+    bullets_g = summarize_to_bullets(details.get("required_actions"))
+    if bullets_g:
+        for i, b in enumerate(bullets_g, 1):
+            story.append(Paragraph(f"{i}. {b}", normal))
+    else:
+        story.append(Paragraph("Required Actions: N/A", normal))
+
+    story.append(Spacer(1, 6))
+
+    bullets_h = summarize_to_bullets(details.get("exceptions"))
+    if bullets_h:
+        for i, b in enumerate(bullets_h, 1):
+            story.append(Paragraph(f"{i}. {b}", normal))
+    else:
+        story.append(Paragraph("Exceptions: N/A", normal))
+
+    story.append(Spacer(1, 10))
+    # --- End new block ---
+
+    # Required Actions + Exceptions (raw text, unchanged)
     story.append(Paragraph("Required Actions", h3))
     ra_text = (details.get("required_actions") or "").strip()
     ex_text = (details.get("exceptions") or "").strip()
@@ -647,6 +738,23 @@ if ad_number:
         sb_list = details.get("sb_references") or []
         st.write(", ".join(sb_list) if sb_list else "N/A")
 
+        # --- New: Bullet summaries in UI ---
+        st.subheader("🔧 (g) Required Actions — Summary")
+        bullets_g = summarize_to_bullets(details.get("required_actions"))
+        if bullets_g:
+            st.markdown("\n".join([f"{i+1}. {b}" for i, b in enumerate(bullets_g)]))
+        else:
+            st.write("N/A")
+
+        st.subheader("📌 (h) Exceptions to Service Information Specifications — Summary")
+        bullets_h = summarize_to_bullets(details.get("exceptions"))
+        if bullets_h:
+            st.markdown("\n".join([f"{i+1}. {b}" for i, b in enumerate(bullets_h)]))
+        else:
+            st.write("N/A")
+
+        st.markdown("---")
+        # Existing raw sections (unchanged)
         st.subheader("🔧 Required Actions (raw section)")
         st.write(details.get("required_actions") or "N/A")
 
