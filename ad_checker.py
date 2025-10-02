@@ -8,30 +8,34 @@ import io
 import csv
 import re
 from datetime import datetime
+from typing import List, Dict, Tuple, Optional
 
-# --- PDF / images ---
+# --- PDF (ReportLab) imports ---
 try:
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import mm
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
+    )
     from reportlab.lib import colors
     REPORTLAB_AVAILABLE = True
 except Exception:
     REPORTLAB_AVAILABLE = False
 
-# For batch mode
+# --- Batch/Merge imports ---
+try:
+    from PyPDF2 import PdfMerger
+    PYPDF2_AVAILABLE = True
+except Exception:
+    PYPDF2_AVAILABLE = False
+
 try:
     import pandas as pd
     PANDAS_AVAILABLE = True
 except Exception:
     PANDAS_AVAILABLE = False
 
-try:
-    from PyPDF2 import PdfMerger
-    PYPDF2_AVAILABLE = True
-except Exception:
-    PYPDF2_AVAILABLE = False
 
 # -----------------------------
 # Page setup + Branding (UI)
@@ -52,7 +56,7 @@ if "compliance_records" not in st.session_state:
     st.session_state["compliance_records"] = []
 
 # -----------------------------
-# Inputs
+# Inputs (single AD)
 # -----------------------------
 ad_number = st.text_input("Enter AD Number (e.g., 2025-01-01):").strip()
 customer_for_report = st.text_input("Customer (for report):").strip()
@@ -61,6 +65,7 @@ customer_for_report = st.text_input("Customer (for report):").strip()
 st.markdown("**PDF Stamp (optional)**")
 stamp_file = st.file_uploader("Upload stamp image (PNG/JPG)", type=["png", "jpg", "jpeg"])
 stamp_path_or_url = st.text_input("Or paste a stamp file path / URL (optional)").strip()
+
 
 # -----------------------------
 # Effective Date Utilities
@@ -71,13 +76,13 @@ EFFECTIVE_SENTENCE_RE = re.compile(
 )
 MONTH_DATE_RE = re.compile(r"\b([A-Za-z]+ \d{1,2}, \d{4})\b")
 
-def _normalize_date(date_str: str) -> str | None:
+def _normalize_date(date_str: str) -> Optional[str]:
     try:
         return datetime.strptime(date_str.strip(), "%B %d, %Y").date().isoformat()
     except Exception:
         return None
 
-def extract_effective_date_from_text(text: str) -> str | None:
+def extract_effective_date_from_text(text: str) -> Optional[str]:
     if not text:
         return None
     t = text.replace("\u00a0", " ")
@@ -96,7 +101,7 @@ def extract_effective_date_from_text(text: str) -> str | None:
                 return norm
     return None
 
-def to_ddmmyyyy(date_str: str | None) -> str | None:
+def to_ddmmyyyy(date_str: Optional[str]) -> Optional[str]:
     if not date_str:
         return None
     try:
@@ -109,6 +114,7 @@ def to_ddmmyyyy(date_str: str | None) -> str | None:
         return dt.strftime("%d-%m-%Y")
     except Exception:
         return date_str
+
 
 # -----------------------------
 # Robust text slicers for (letter) sections
@@ -125,7 +131,8 @@ LETTER_BLOCK_RE_TEMPLATE = r"""
         | \Z
     )
 """
-def slice_letter_block(full_text: str, letter: str) -> str | None:
+
+def slice_letter_block(full_text: str, letter: str) -> Optional[str]:
     if not full_text:
         return None
     t = full_text.replace("\u00a0", " ")
@@ -142,7 +149,7 @@ def slice_letter_block(full_text: str, letter: str) -> str | None:
 
 # SB code pattern & helpers
 SB_CODE_RE = re.compile(r"\b[A-Z0-9]+(?:-[A-Z0-9]+)*-SB[0-9A-Z]+(?:-[0-9A-Z]+)*\b", re.IGNORECASE)
-def find_sb_refs(text: str) -> list[str]:
+def find_sb_refs(text: str) -> List[str]:
     if not text:
         return []
     refs = [m.group(0).upper() for m in SB_CODE_RE.finditer(text)]
@@ -153,7 +160,7 @@ def find_sb_refs(text: str) -> list[str]:
             out.append(r)
     return out
 
-def ata_from_sb_code(sb_code: str) -> str | None:
+def ata_from_sb_code(sb_code: str) -> Optional[str]:
     """
     Extract the two digits immediately after 'SB' in an SB code, e.g.:
     '...-SB420045-00' -> '42'
@@ -166,6 +173,7 @@ def ata_from_sb_code(sb_code: str) -> str | None:
         return m2.group(1)
     return None
 
+
 # -----------------------------
 # ATA Chapter detection (Subject -> SB-based -> other heuristics)
 # -----------------------------
@@ -173,7 +181,7 @@ ATA_FROM_SUBJECT_RE = re.compile(
     r"\b(?:JASC\/)?ATA(?:\s*chapter)?\s*[:\-]?\s*(\d{2})(?:[.\- ]?\d{2})?\b",
     re.IGNORECASE
 )
-def detect_ata_from_subject(full_text: str) -> str | None:
+def detect_ata_from_subject(full_text: str) -> Optional[str]:
     subj = slice_letter_block(full_text, "d")
     if not subj:
         return None
@@ -198,7 +206,7 @@ ATA_KEYWORD_HINTS = [
     (r"\blanding gear\b", "32"),
     (r"\bair conditioning\b", "21"),
 ]
-def detect_ata_fallback(full_text: str, sb_refs: list[str] | None = None) -> str | None:
+def detect_ata_fallback(full_text: Optional[str], sb_refs: Optional[List[str]] = None) -> Optional[str]:
     # 1) Prefer SB-based ATA: first two digits after 'SB'
     if sb_refs:
         for ref in sb_refs:
@@ -220,13 +228,14 @@ def detect_ata_fallback(full_text: str, sb_refs: list[str] | None = None) -> str
                 return code
     return None
 
+
 # -----------------------------
 # Targeted summarizer for (g) and (h)
 # -----------------------------
-def summarize_g_h_sections(req_text: str | None, exc_text: str | None) -> tuple[list[str], list[str]]:
+def summarize_g_h_sections(req_text: Optional[str], exc_text: Optional[str]) -> Tuple[List[str], List[str]]:
     """
     Produce structured, numbered bullet points for (g) Required Actions and (h) Exceptions,
-    tuned to FAA AD phrasing (e.g., AD 2020-06-14).
+    tuned to FAA AD phrasing (e.g., AD 2020-06-14). Also echoes Issue number in (h) when present.
     """
     bullets_g, bullets_h = [], []
 
@@ -248,7 +257,7 @@ def summarize_g_h_sections(req_text: str | None, exc_text: str | None) -> tuple[
         if m_date:
             issue_date = m_date.group(1)
 
-        # Build SB phrase like: "B787-81205-SB420045-00, Issue 002 (February 14, 2020)"
+        # Build SB phrase
         sb_phrase = sb_ref
         if issue and issue_date:
             sb_phrase = f"{sb_ref}, Issue {issue} ({issue_date})"
@@ -263,7 +272,7 @@ def summarize_g_h_sections(req_text: str | None, exc_text: str | None) -> tuple[
         mentions_h_exception = bool(re.search(r"\bparagraph\s*\(?h\)?\b", t, flags=re.IGNORECASE)) or \
                                bool(re.search(r"\bexcept as specified\b", t, flags=re.IGNORECASE))
 
-        # Construct bullets
+        # Construct bullets closely matching your example
         if has_rc:
             bullets_g.append(
                 f"Perform all actions labeled 'RC' (required for compliance) in the Accomplishment Instructions of {sb_phrase}."
@@ -306,6 +315,7 @@ def summarize_g_h_sections(req_text: str | None, exc_text: str | None) -> tuple[
                 )
             bullets_h.append("All other Service Bulletin instructions remain unchanged.")
         else:
+            # Generic exception paraphrase if not the date-substitution pattern
             sentences = re.split(r'(?<=[.!?])\s+', t)
             for s in sentences:
                 s = s.strip()
@@ -316,6 +326,7 @@ def summarize_g_h_sections(req_text: str | None, exc_text: str | None) -> tuple[
                     break
 
     return bullets_g, bullets_h
+
 
 # -----------------------------
 # Data fetchers
@@ -347,7 +358,7 @@ def fetch_ad_data(ad_number: str):
         st.error(f"❌ Request failed: {e}")
     return None
 
-def fetch_document_json(document_number: str) -> dict | None:
+def fetch_document_json(document_number: str) -> Optional[Dict]:
     if not document_number:
         return None
     url = f"https://www.federalregister.gov/api/v1/documents/{document_number}.json"
@@ -359,7 +370,7 @@ def fetch_document_json(document_number: str) -> dict | None:
     except Exception:
         return None
 
-def extract_effective_from_api_document(doc_json: dict, html_fallback_text: str | None = None) -> str | None:
+def extract_effective_from_api_document(doc_json: Optional[Dict], html_fallback_text: Optional[str] = None) -> Optional[str]:
     if not doc_json:
         doc_json = {}
 
@@ -400,10 +411,11 @@ def extract_effective_from_api_document(doc_json: dict, html_fallback_text: str 
 
     return None
 
+
 # -----------------------------
 # Section details extractor
 # -----------------------------
-def extract_details(ad_html_url: str, api_doc: dict | None):
+def extract_details(ad_html_url: str, api_doc: Optional[Dict]):
     headers = {"User-Agent": "Mozilla/5.0"}
     full_text = ""
 
@@ -468,12 +480,13 @@ def extract_details(ad_html_url: str, api_doc: dict | None):
         "_full_html_text": full_text,
     }
 
+
 # -----------------------------
 # Image helpers (logo/stamp)
 # -----------------------------
-def _image_flowable_fit(source_bytes: bytes | None = None, path_or_url: str | None = None,
+def _image_flowable_fit(source_bytes: Optional[bytes] = None, path_or_url: Optional[str] = None,
                         max_w_mm: float = 60, max_h_mm: float = 60):
-    """Return a ReportLab Image flowable scaled proportionally to fit within max box."""
+    """Return a ReportLab Image flowable scaled proportionally to fit within max box (aspect ratio preserved)."""
     try:
         from PIL import Image as PILImage
         if source_bytes:
@@ -501,101 +514,26 @@ def _image_flowable_fit(source_bytes: bytes | None = None, path_or_url: str | No
     except Exception:
         return None
 
-# -----------------------------
-# PDF: tally sheet builder (for batch)
-# -----------------------------
-def build_tally_pdf(tally_rows: list[dict], logo_url: str, site_url: str) -> bytes:
-    """
-    Create a single-page (or multi if needed) tally sheet listing all processed ADs.
-    Each row dict: {"ad_number","document_number","title","effective_date","ata"}
-    """
-    if not REPORTLAB_AVAILABLE:
-        raise RuntimeError("ReportLab is not installed.")
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buf,
-        pagesize=A4,
-        leftMargin=16*mm, rightMargin=16*mm,
-        topMargin=16*mm, bottomMargin=16*mm,
-        title="AD Batch Tally Sheet",
-        author="Feras Aviation AD Compliance Checker",
-    )
-    styles = getSampleStyleSheet()
-    normal = styles["BodyText"]
-    h1 = styles["Heading1"]
-    small = ParagraphStyle("small", parent=normal, fontSize=9, leading=12, textColor=colors.grey)
-
-    story = []
-
-    # header with logo + site
-    try:
-        r = requests.get(logo_url, timeout=10)
-        r.raise_for_status()
-        story.append(Image(io.BytesIO(r.content), width=40*mm))
-    except Exception:
-        pass
-    story.append(Paragraph(f'<font size="12"><a href="{site_url}">{site_url}</a></font>', small))
-    story.append(Spacer(1, 6))
-
-    story.append(Paragraph("AD Batch Tally Sheet", h1))
-    story.append(Paragraph(f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}", small))
-    story.append(Spacer(1, 10))
-
-    # build table
-    header = ["#", "AD Number", "Document Number", "Effective Date", "ATA", "Title"]
-    rows = [header]
-    for i, row in enumerate(tally_rows, start=1):
-        rows.append([
-            str(i),
-            row.get("ad_number",""),
-            row.get("document_number",""),
-            row.get("effective_date","") or "N/A",
-            row.get("ata","") or "N/A",
-            row.get("title","") or "",
-        ])
-
-    # column widths
-    avail = A4[0] - (16*mm + 16*mm)
-    col_weights = [6, 20, 28, 22, 12, 68]  # sums to 156
-    total_w = sum(col_weights)
-    col_widths = [avail * w/total_w for w in col_weights]
-
-    table = Table(rows, colWidths=col_widths, repeatRows=1, hAlign="LEFT")
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), colors.lightgrey),
-        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-        ("FONTSIZE", (0,0), (-1,-1), 9),
-        ("VALIGN", (0,0), (-1,-1), "TOP"),
-        ("LINEABOVE", (0,0), (-1,0), 0.5, colors.grey),
-        ("LINEBELOW", (0,0), (-1,-1), 0.25, colors.grey),
-        ("BOX", (0,0), (-1,-1), 0.5, colors.grey),
-        ("INNERGRID", (0,0), (-1,-1), 0.25, colors.grey),
-    ]))
-    story.append(table)
-
-    doc.build(story)
-    buf.seek(0)
-    return buf.getvalue()
 
 # -----------------------------
 # PDF report builder (single AD)
 # -----------------------------
 def build_pdf_report(
-    ad_data: dict,
-    details: dict,
-    records: list,
+    ad_data: Dict,
+    details: Dict,
+    records: List[Dict],
     logo_url: str,
     site_url: str,
     customer: str,
     aircraft: str,
-    ata_chapter: str | None,
-    stamp_bytes: bytes | None = None,
-    stamp_path_or_url: str | None = None
+    ata_chapter: Optional[str],
+    stamp_bytes: Optional[bytes] = None,
+    stamp_path_or_url: Optional[str] = None
 ) -> bytes:
     if not REPORTLAB_AVAILABLE:
         raise RuntimeError("ReportLab is not installed. Add 'reportlab' to your requirements.txt.")
 
-    # Prepare grayscale 30% logo
+    # Prepare grayscale 30% logo for the report header (keeps AR via helper below if fallback)
     logo_flowable = None
     try:
         from PIL import Image as PILImage
@@ -609,12 +547,8 @@ def build_pdf_report(
         logo_buf.seek(0)
         logo_flowable = Image(logo_buf)
     except Exception:
-        try:
-            resp = requests.get(logo_url, timeout=10)
-            resp.raise_for_status()
-            logo_flowable = Image(io.BytesIO(resp.content), width=40*mm)
-        except Exception:
-            logo_flowable = None
+        # Fallback: proportional fit (preserves aspect ratio)
+        logo_flowable = _image_flowable_fit(path_or_url=logo_url, max_w_mm=40, max_h_mm=20)
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -709,7 +643,7 @@ def build_pdf_report(
 
     story.append(Spacer(1, 10))
 
-    # Raw sections (unchanged)
+    # Required Actions + Exceptions (raw text, unchanged)
     story.append(Paragraph("Required Actions", h3))
     ra_text = (details.get("required_actions") or "").strip()
     ex_text = (details.get("exceptions") or "").strip()
@@ -727,7 +661,7 @@ def build_pdf_report(
     story.append(Paragraph(ct_text, normal))
     story.append(Spacer(1, 8))
 
-    # ------------------- Compliance Records Table -------------------
+    # ------------------- Responsive Compliance Records Table -------------------
     story.append(Paragraph("Compliance Records", h2))
     records_list = records or []
     if not records_list:
@@ -789,8 +723,8 @@ def build_pdf_report(
             ("INNERGRID", (0,0), (-1,-1), 0.25, colors.grey),
         ]))
         story.append(table)
-    # --------------------------------------------------------------------------
 
+    # Footer note
     story.append(Spacer(1, 18))
     story.append(Paragraph("Generated by Feras Aviation AD Compliance Checker", small))
 
@@ -807,14 +741,118 @@ def build_pdf_report(
         story.append(Paragraph("Approval Stamp", h2))
         story.append(Spacer(1, 12))
         story.append(stamp_flowable)
-    # ----------------------------------------------
 
     doc.build(story)
     buf.seek(0)
     return buf.getvalue()
 
+
 # -----------------------------
-# Single-AD UI flow (unchanged)
+# Batch Tally PDF (with stamp & proper logo AR)
+# -----------------------------
+def build_tally_pdf(
+    rows: List[Dict],
+    logo_url: str,
+    site_url: str,
+    stamp_bytes: Optional[bytes] = None,
+    stamp_path_or_url: Optional[str] = None
+) -> bytes:
+    """
+    rows: list of dicts with keys:
+      'ad_number', 'document_number', 'title', 'publication_date', 'effective_date', 'ata'
+    """
+    if not REPORTLAB_AVAILABLE:
+        raise RuntimeError("ReportLab is not installed. Add 'reportlab' to your requirements.txt.")
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        leftMargin=16*mm,
+        rightMargin=16*mm,
+        topMargin=16*mm,
+        bottomMargin=16*mm,
+        title="Batch AD Tally",
+        author="Feras Aviation AD Compliance Checker",
+    )
+
+    styles = getSampleStyleSheet()
+    h1 = styles["Heading1"]
+    h2 = styles["Heading2"]
+    normal = styles["BodyText"]
+    small = ParagraphStyle("small", parent=normal, fontSize=9, leading=12, textColor=colors.grey)
+
+    story = []
+
+    # Logo (preserve aspect ratio on tally sheet!)
+    logo_flowable = _image_flowable_fit(path_or_url=logo_url, max_w_mm=40, max_h_mm=20)
+    if logo_flowable:
+        story.append(logo_flowable)
+    story.append(Paragraph(f'<font size="12"><a href="{site_url}">{site_url}</a></font>', small))
+    story.append(Spacer(1, 8))
+
+    story.append(Paragraph("Batch AD Tally", h1))
+    generated_ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    story.append(Paragraph(f"Generated: {generated_ts}", small))
+    story.append(Spacer(1, 12))
+
+    # Table header
+    header = ["AD Number", "Document Number", "ATA", "Effective Date", "Title"]
+    data = [[Paragraph(h, ParagraphStyle("th", parent=small, fontName="Helvetica-Bold")) for h in header]]
+
+    for r in rows:
+        eff = r.get("effective_date") or "N/A"
+        row_list = [
+            Paragraph(r.get("ad_number",""), small),
+            Paragraph(r.get("document_number",""), small),
+            Paragraph(r.get("ata","") or "N/A", small),
+            Paragraph(eff, small),
+            Paragraph(r.get("title","") or "N/A", small)
+        ]
+        data.append(row_list)
+
+    # adaptive column widths
+    avail_width = doc.width
+    weights = [16, 28, 10, 18, 48]  # relative weights
+    total_w = sum(weights)
+    col_widths = [avail_width * w / total_w for w in weights]
+
+    table = Table(data, colWidths=col_widths, repeatRows=1, hAlign="LEFT")
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), colors.lightgrey),
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("FONTSIZE",  (0,0), (-1,-1), 9),
+        ("VALIGN",    (0,0), (-1,-1), "TOP"),
+        ("LINEABOVE", (0,0), (-1,0),  0.5, colors.grey),
+        ("LINEBELOW", (0,0), (-1,-1), 0.25, colors.grey),
+        ("BOX",       (0,0), (-1,-1), 0.5, colors.grey),
+        ("INNERGRID", (0,0), (-1,-1), 0.25, colors.grey),
+    ]))
+    story.append(table)
+
+    story.append(Spacer(1, 18))
+    story.append(Paragraph("Generated by Feras Aviation AD Compliance Checker", small))
+
+    # Stamp at the end of tally sheet
+    stamp_flowable = _image_flowable_fit(
+        source_bytes=stamp_bytes,
+        path_or_url=stamp_path_or_url if stamp_bytes is None else None,
+        max_w_mm=60,
+        max_h_mm=60
+    )
+    if stamp_flowable:
+        story.append(Spacer(1, 12))
+        story.append(Paragraph("Approval Stamp", styles["Heading3"]))
+        story.append(Spacer(1, 8))
+        story.append(stamp_flowable)
+
+    doc.build(story)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+# -----------------------------
+# Main flow (single AD)
 # -----------------------------
 if ad_number:
     with st.spinner("🔍 Searching Federal Register..."):
@@ -867,7 +905,7 @@ if ad_number:
         if eff_display:
             data["effective_date"] = eff_display
 
-        st.subheading = st.subheader  # alias
+        st.subheading = st.subheader  # alias to avoid accidental mistakes later
 
         st.subheader("🛩️ Applicability / Affected Aircraft")
         st.write(details.get("affected_aircraft") or "N/A")
@@ -876,7 +914,7 @@ if ad_number:
         sb_list = details.get("sb_references") or []
         st.write(", ".join(sb_list) if sb_list else "N/A")
 
-        # --- (g) and (h) summaries in UI ---
+        # --- (g) and (h) structured, NUMBERED summaries in UI ---
         st.subheader("🔧 (g) Required Actions — key points")
         bullets_g, bullets_h = summarize_g_h_sections(
             details.get("required_actions"),
@@ -894,7 +932,7 @@ if ad_number:
             st.write("N/A")
 
         st.markdown("---")
-        # Raw sections (unchanged)
+        # Existing raw sections (unchanged)
         st.subheader("🔧 Required Actions (raw section)")
         st.write(details.get("required_actions") or "N/A")
 
@@ -993,8 +1031,8 @@ if ad_number:
                 st.markdown(f"**Entry {idx}** — Status: {rec['status']}")
                 st.json({k: v for k, v in rec.items()})
 
-            buf = io.StringIO()
-            writer = csv.writer(buf)
+            buf_csv = io.StringIO()
+            writer = csv.writer(buf_csv)
             writer.writerow([
                 "ad_number","document_number","status","method","method_other","applic_aircraft",
                 "applic_serials","performed_date","performed_hours","performed_cycles",
@@ -1020,13 +1058,13 @@ if ad_number:
                 ])
             st.download_button(
                 "Download Compliance CSV",
-                data=buf.getvalue().encode("utf-8"),
+                data=buf_csv.getvalue().encode("utf-8"),
                 file_name=f"compliance_{data['document_number']}.csv",
                 mime="text/csv",
             )
 
         # -----------------------------
-        # PDF Report Download
+        # PDF Report Download (single)
         # -----------------------------
         st.divider()
         st.subheader("📄 Generate PDF Report")
@@ -1068,132 +1106,158 @@ if ad_number:
     else:
         st.error("❌ AD not found. Please check the number exactly as it appears (e.g., 2025-01-01).")
 
-# =============================
-# BATCH MODE (Excel -> merged PDF with Tally Sheet)
-# =============================
+
+# -----------------------------
+# 📦 Batch Mode (Excel → merged PDF)
+# -----------------------------
 st.divider()
-st.header("📦 Batch Mode: Excel → One merged PDF")
-st.caption("Upload an Excel file with a column named **AD** or **AD Number**. We'll generate a PDF per AD and merge them into one file that ends with a tally sheet.")
+st.subheader("📦 Batch Mode (Excel → merged PDF)")
+st.caption("Upload an .xlsx with a column named **AD Number**. Optional columns: **Customer**, **Aircraft**.")
+xlsx = st.file_uploader("Upload AD list (.xlsx)", type=["xlsx"], key="batch_xlsx")
 
-batch_file = st.file_uploader("Upload Excel (.xlsx)", type=["xlsx"], key="batch_xlsx")
+if xlsx is not None and (not PANDAS_AVAILABLE or not PYPDF2_AVAILABLE or not REPORTLAB_AVAILABLE):
+    missing = []
+    if not PANDAS_AVAILABLE: missing.append("pandas")
+    if not PYPDF2_AVAILABLE: missing.append("PyPDF2")
+    if not REPORTLAB_AVAILABLE: missing.append("reportlab (and pillow)")
+    st.error("Batch mode requires: " + ", ".join(missing))
 
-def process_single_ad_for_batch(ad_no: str, customer: str = "") -> tuple[bytes | None, dict | None]:
-    """
-    Returns (pdf_bytes, tally_row_dict) for a given AD number, or (None, None) if not found.
-    """
-    try:
-        data = fetch_ad_data(ad_no)
-        if not data:
-            return None, None
-        data["ad_number"] = ad_no
-        api_doc = fetch_document_json(data.get("document_number"))
-
-        details = extract_details(data["html_url"], api_doc)
-        detected_ata = detect_ata_from_subject(details.get("_full_html_text",""))
-        if not detected_ata:
-            detected_ata = detect_ata_fallback(details.get("_full_html_text",""), details.get("sb_references"))
-
-        # Effective date resolve
-        api_eff_field_iso = (data.get("effective_date") or "").strip()
-        effective_resolved_iso = api_eff_field_iso if api_eff_field_iso and api_eff_field_iso.upper() != "N/A" else None
-        if not effective_resolved_iso:
-            effective_resolved_iso = extract_effective_from_api_document(
-                api_doc,
-                html_fallback_text=details.get("_full_html_text", "")
-            )
-        eff_display = to_ddmmyyyy(effective_resolved_iso) or to_ddmmyyyy(api_eff_field_iso)
-        if eff_display:
-            data["effective_date"] = eff_display
-
-        # No compliance records in batch (unless you extend later)
-        pdf_bytes = build_pdf_report(
-            ad_data=data,
-            details=details,
-            records=[],
-            logo_url=LOGO_URL,
-            site_url=SITE_URL,
-            customer=customer,
-            aircraft="",  # left blank in batch
-            ata_chapter=detected_ata,
-            stamp_bytes=None,
-            stamp_path_or_url=None
-        )
-
-        tally_row = {
-            "ad_number": ad_no,
-            "document_number": data.get("document_number",""),
-            "title": data.get("title",""),
-            "effective_date": data.get("effective_date",""),
-            "ata": detected_ata or "",
-        }
-        return pdf_bytes, tally_row
-    except Exception:
-        return None, None
-
-if batch_file is not None:
-    if not (PANDAS_AVAILABLE and PYPDF2_AVAILABLE and REPORTLAB_AVAILABLE):
-        missing = []
-        if not PANDAS_AVAILABLE: missing.append("pandas")
-        if not PYPDF2_AVAILABLE: missing.append("PyPDF2")
-        if not REPORTLAB_AVAILABLE: missing.append("reportlab")
-        st.error(f"Missing packages for batch mode: {', '.join(missing)}")
-    else:
+if xlsx is not None and PANDAS_AVAILABLE and PYPDF2_AVAILABLE and REPORTLAB_AVAILABLE:
+    if st.button("Generate merged PDF with tally"):
         try:
-            df = pd.read_excel(batch_file, engine="openpyxl")
+            df = pd.read_excel(xlsx)  # requires openpyxl installed
         except Exception as e:
             st.error(f"Failed to read Excel file: {e}")
             df = None
 
         if df is not None:
-            # Find AD column
-            col_candidates = [c for c in df.columns if str(c).strip().lower() in ("ad", "ad number", "ad_number")]
-            if not col_candidates:
-                st.error("Couldn't find a column named 'AD' or 'AD Number'. Please adjust the Excel and re-upload.")
+            # try to find AD column
+            ad_col = None
+            for c in df.columns:
+                if str(c).strip().lower() in {"ad number", "ad_number", "ad"}:
+                    ad_col = c
+                    break
+            if ad_col is None:
+                st.error("No column named 'AD Number' found.")
             else:
-                ad_col = col_candidates[0]
-                ad_list = [str(x).strip() for x in df[ad_col].dropna().tolist() if str(x).strip()]
-                st.write(f"Found **{len(ad_list)}** ADs to process.")
-                customer_batch = st.text_input("Customer (applied to all batch reports):", value=customer_for_report, key="batch_customer")
+                merger = PdfMerger()
+                tally_rows = []
 
-                if st.button("Generate Merged PDF with Tally Sheet"):
-                    tally_rows = []
-                    merger = PdfMerger()
-                    per_ad_results = []
+                # Prepare stamp bytes once
+                tally_stamp_bytes = stamp_file.read() if stamp_file is not None else None
+                tally_stamp_url = stamp_path_or_url if tally_stamp_bytes is None else None
 
-                    with st.spinner("Generating PDFs and merging..."):
-                        for idx, ad_no in enumerate(ad_list, start=1):
-                            pdf_bytes, tally_row = process_single_ad_for_batch(ad_no, customer_batch)
-                            if pdf_bytes and tally_row:
-                                per_ad_results.append((ad_no, True))
-                                tally_rows.append(tally_row)
-                                merger.append(io.BytesIO(pdf_bytes))
-                            else:
-                                per_ad_results.append((ad_no, False))
+                for idx, row in df.iterrows():
+                    ad_no = str(row[ad_col]).strip()
+                    if not ad_no or ad_no.lower() == "nan":
+                        continue
 
-                        # Build tally sheet and append
-                        if tally_rows:
-                            tally_pdf = build_tally_pdf(tally_rows, LOGO_URL, SITE_URL)
-                            merger.append(io.BytesIO(tally_pdf))
+                    row_customer = ""
+                    row_aircraft = ""
+                    # optional columns
+                    for col in df.columns:
+                        cl = str(col).strip().lower()
+                        if cl == "customer":
+                            row_customer = str(row[col]) if not pd.isna(row[col]) else ""
+                        if cl == "aircraft":
+                            row_aircraft = str(row[col]) if not pd.isna(row[col]) else ""
 
-                    # Write merged to bytes
-                    out_buf = io.BytesIO()
-                    try:
-                        merger.write(out_buf)
-                        merger.close()
-                        out_buf.seek(0)
-                        st.success("Merged PDF with Tally Sheet created.")
-                        st.download_button(
-                            "Download Merged PDF",
-                            data=out_buf.getvalue(),
-                            file_name=f"AD_Batch_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf",
-                            mime="application/pdf",
+                    # fetch + build each PDF
+                    data = fetch_ad_data(ad_no)
+                    if not data:
+                        st.warning(f"Skipping {ad_no}: not found.")
+                        continue
+                    data["ad_number"] = ad_no
+                    api_doc = fetch_document_json(data.get("document_number"))
+                    details = extract_details(data['html_url'], api_doc)
+
+                    detected_ata = detect_ata_from_subject(details.get("_full_html_text",""))
+                    if not detected_ata:
+                        detected_ata = detect_ata_fallback(details.get("_full_html_text",""), details.get("sb_references"))
+
+                    # Resolve effective date
+                    api_eff_field_iso = (data.get("effective_date") or "").strip()
+                    effective_resolved_iso = api_eff_field_iso if api_eff_field_iso and api_eff_field_iso.upper() != "N/A" else None
+                    if not effective_resolved_iso:
+                        effective_resolved_iso = extract_effective_from_api_document(
+                            api_doc,
+                            html_fallback_text=details.get("_full_html_text", "")
                         )
-                    except Exception as e:
-                        st.error(f"Failed to write merged PDF: {e}")
+                    eff_display = to_ddmmyyyy(effective_resolved_iso) or to_ddmmyyyy(api_eff_field_iso)
+                    if eff_display:
+                        data["effective_date"] = eff_display
 
-                    # Show a small summary
-                    st.subheader("Batch Summary")
-                    ok = [a for a, s in per_ad_results if s]
-                    ko = [a for a, s in per_ad_results if not s]
-                    st.write(f"✅ Successful: {len(ok)} — {', '.join(ok) if ok else '—'}")
-                    st.write(f"❌ Failed: {len(ko)} — {', '.join(ko) if ko else '—'}")
+                    # Single report PDF in-memory
+                    try:
+                        pdf_bytes = build_pdf_report(
+                            ad_data=data,
+                            details=details,
+                            records=[],  # batch: no interactive records by default
+                            logo_url=LOGO_URL,
+                            site_url=SITE_URL,
+                            customer=row_customer or customer_for_report,
+                            aircraft=row_aircraft,
+                            ata_chapter=detected_ata,
+                            stamp_bytes=tally_stamp_bytes,
+                            stamp_path_or_url=tally_stamp_url
+                        )
+                        merger.append(io.BytesIO(pdf_bytes))
+                    except Exception as e:
+                        st.warning(f"Failed to build PDF for {ad_no}: {e}")
+                        continue
+
+                    # Add to tally
+                    tally_rows.append({
+                        "ad_number": ad_no,
+                        "document_number": data.get("document_number", ""),
+                        "title": data.get("title", "") or "",
+                        "publication_date": data.get("publication_date", "") or "",
+                        "effective_date": data.get("effective_date", "") or "N/A",
+                        "ata": detected_ata or "",
+                    })
+
+                # Build tally sheet PDF and append to merger
+                try:
+                    tally_pdf = build_tally_pdf(
+                        rows=tally_rows,
+                        logo_url=LOGO_URL,     # preserve AR on tally via helper
+                        site_url=SITE_URL,
+                        stamp_bytes=tally_stamp_bytes,
+                        stamp_path_or_url=tally_stamp_url
+                    )
+                    merger.append(io.BytesIO(tally_pdf))
+                except Exception as e:
+                    st.warning(f"Failed to build/append tally sheet: {e}")
+
+                # Output merged
+                out_buf = io.BytesIO()
+                merger.write(out_buf)
+                merger.close()
+                out_buf.seek(0)
+                st.download_button(
+                    "Download Merged PDF (with tally)",
+                    data=out_buf.getvalue(),
+                    file_name="AD_Merged_Report.pdf",
+                    mime="application/pdf",
+                )
+
+
+# -----------------------------
+# Proposal: add compliance records per AD in batch
+# -----------------------------
+st.markdown("""
+<details>
+<summary><b>💡 Idea to include compliance records in each AD report (batch)</b></summary>
+
+**Option A (extra columns in the same Excel):**
+- Add optional columns like: <i>Status, Method, Method Other, Applic Aircraft, Serials, Performed Date, Performed Hours, Performed Cycles, Repetitive, Interval Value, Interval Unit, Basis</i>.
+- For multiple records per AD, list them on separate rows repeating the same "AD Number". The generator can group rows by AD Number and include all rows as records in that AD’s PDF.
+
+**Option B (second sheet):**
+- Keep your current AD list in the first sheet.
+- Add a second sheet named <i>Records</i> with a column <i>AD Number</i> linking each record to the AD.
+- Same record columns as above; the app will join per AD and render them in the individual PDFs.
+
+If you want this, tell me which option you prefer and I’ll wire it up.
+</details>
+""", unsafe_allow_html=True)
