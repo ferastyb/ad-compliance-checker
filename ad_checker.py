@@ -9,12 +9,28 @@ import csv
 import re
 from datetime import datetime, date
 
+# Optional pandas for batch XLSX
+try:
+    import pandas as pd
+    PANDAS_AVAILABLE = True
+except Exception:
+    PANDAS_AVAILABLE = False
+
 # --- PDF (ReportLab) imports ---
 try:
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import mm
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
+    from reportlab.platypus import (
+        SimpleDocTemplate,
+        Paragraph,
+        Spacer,
+        Table,
+        TableStyle,
+        Image,
+        PageBreak
+    )
+    from reportlab.lib import colors
     REPORTLAB_AVAILABLE = True
 except Exception:
     REPORTLAB_AVAILABLE = False
@@ -43,14 +59,34 @@ if "compliance_records" not in st.session_state:
 ad_number = st.text_input("Enter AD Number (e.g., 2025-01-01):").strip()
 customer_for_report = st.text_input("Customer (for report):").strip()
 
+# Compliance status date (editable, used in PDFs)
+default_status_date = date.today()
+compliance_status_date = st.date_input("Compliance status as of", value=default_status_date)
+
 # Optional stamp inputs (use either)
 st.markdown("**PDF Stamp (optional)**")
 stamp_file = st.file_uploader("Upload stamp image (PNG/JPG)", type=["png", "jpg", "jpeg"])
 stamp_path_or_url = st.text_input("Or paste a stamp file path / URL (optional)").strip()
 
-# NEW: Compliance Status Date (editable, defaults to today in dd-mm-YYYY)
-default_today = date.today().strftime("%d-%m-%Y")
-compliance_status_date = st.text_input("Compliance Status Date", value=default_today)
+# -----------------------------
+# Batch Mode: XLSX Upload of AD numbers
+# -----------------------------
+st.subheader("📂 Batch Mode: Upload List of ADs (XLSX)")
+ad_file = st.file_uploader("Upload Excel file with AD numbers (one per row, first column)", type=["xlsx"], key="xlsx_uploader")
+
+ad_list = []
+if ad_file:
+    if not PANDAS_AVAILABLE:
+        st.error("Batch mode requires pandas and openpyxl. Please add them to your environment.")
+    else:
+        try:
+            df = pd.read_excel(ad_file)
+            ad_list = df.iloc[:, 0].dropna().astype(str).str.strip().tolist()
+            st.success(f"✅ Loaded {len(ad_list)} AD numbers from file.")
+            if len(ad_list) > 0:
+                st.write("First few ADs:", ad_list[:10])
+        except Exception as e:
+            st.error(f"❌ Failed to read Excel file: {e}")
 
 # -----------------------------
 # Effective Date Utilities
@@ -151,6 +187,7 @@ def ata_from_sb_code(sb_code: str) -> str | None:
     m = re.search(r"-SB(\d{2})", sb_code, flags=re.IGNORECASE)
     if m:
         return m.group(1)
+    # If pattern SB + >2 digits appears, still take first two
     m2 = re.search(r"-SB(\d{2})\d+", sb_code, flags=re.IGNORECASE)
     if m2:
         return m2.group(1)
@@ -493,9 +530,10 @@ def _image_flowable_fit(source_bytes: bytes | None = None, path_or_url: str | No
         return None
 
 # -----------------------------
-# PDF report builder
+# Shared section builder (Flowables for a single AD)
 # -----------------------------
-def build_pdf_report(
+def _make_ad_section_flowables(
+    styles,
     ad_data: dict,
     details: dict,
     records: list,
@@ -504,68 +542,52 @@ def build_pdf_report(
     customer: str,
     aircraft: str,
     ata_chapter: str | None,
-    compliance_status_date: str,
-    stamp_bytes: bytes | None = None,
-    stamp_path_or_url: str | None = None
-) -> bytes:
-    if not REPORTLAB_AVAILABLE:
-        raise RuntimeError("ReportLab is not installed. Add 'reportlab' to your requirements.txt.")
-
-    # Prepare grayscale 30% logo
-    logo_flowable = None
-    try:
-        from PIL import Image as PILImage
-        resp = requests.get(logo_url, timeout=10)
-        resp.raise_for_status()
-        pil_img = PILImage.open(io.BytesIO(resp.content)).convert("L")
-        w, h = pil_img.size
-        pil_img = pil_img.resize((max(1, int(w * 0.3)), max(1, int(h * 0.3))), PILImage.LANCZOS)
-        logo_buf = io.BytesIO()
-        pil_img.save(logo_buf, format="PNG")
-        logo_buf.seek(0)
-        logo_flowable = Image(logo_buf)
-    except Exception:
-        try:
-            resp = requests.get(logo_url, timeout=10)
-            resp.raise_for_status()
-            logo_flowable = Image(io.BytesIO(resp.content), width=40*mm)
-        except Exception:
-            logo_flowable = None
-
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buf,
-        pagesize=A4,
-        leftMargin=16*mm,
-        rightMargin=16*mm,
-        topMargin=16*mm,
-        bottomMargin=16*mm,
-        title=f"AD Report - {ad_data.get('document_number') or 'Unknown'}",
-        author="Feras Aviation AD Compliance Checker",
-    )
-
-    styles = getSampleStyleSheet()
-    from reportlab.lib import colors
+    compliance_status_date: date,
+    add_logo_and_site: bool = True
+):
     h1 = styles["Heading1"]
     h2 = styles["Heading2"]
     h3 = styles["Heading3"]
     normal = styles["BodyText"]
     small = ParagraphStyle("small", parent=normal, fontSize=9, leading=12, textColor=colors.grey)
 
-    story = []
+    flow = []
 
-    if logo_flowable:
-        story.append(logo_flowable)
-    story.append(Paragraph(f'<font size="12"><a href="{site_url}">{site_url}</a></font>', small))
-    story.append(Spacer(1, 6))
+    # Optional top branding for each section
+    if add_logo_and_site:
+        # Prepare grayscale 30% logo
+        logo_flowable = None
+        try:
+            from PIL import Image as PILImage
+            resp = requests.get(logo_url, timeout=10)
+            resp.raise_for_status()
+            pil_img = PILImage.open(io.BytesIO(resp.content)).convert("L")
+            w, h = pil_img.size
+            pil_img = pil_img.resize((max(1, int(w * 0.3)), max(1, int(h * 0.3))), PILImage.LANCZOS)
+            logo_buf = io.BytesIO()
+            pil_img.save(logo_buf, format="PNG")
+            logo_buf.seek(0)
+            logo_flowable = Image(logo_buf)
+        except Exception:
+            try:
+                resp = requests.get(logo_url, timeout=10)
+                resp.raise_for_status()
+                logo_flowable = Image(io.BytesIO(resp.content), width=40*mm)
+            except Exception:
+                logo_flowable = None
 
-    story.append(Paragraph("AD Compliance Report", h1))
-    story.append(Spacer(1, 6))
+        if logo_flowable:
+            flow.append(logo_flowable)
+        flow.append(Paragraph(f'<font size="12"><a href="{site_url}">{site_url}</a></font>', small))
+        flow.append(Spacer(1, 6))
+
+    flow.append(Paragraph("AD Compliance Report", h1))
+    flow.append(Spacer(1, 6))
     generated_ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    story.append(Paragraph(f"Generated: {generated_ts}", small))
-    story.append(Spacer(1, 12))
+    flow.append(Paragraph(f"Generated: {generated_ts}", small))
+    flow.append(Spacer(1, 12))
 
-    story.append(Paragraph("Airworthiness Directive", h2))
+    flow.append(Paragraph("Airworthiness Directive", h2))
     meta_data = [
         ["AD Number", ad_data.get("ad_number") or ""],
         ["Document Number", ad_data.get("document_number") or ""],
@@ -587,23 +609,23 @@ def build_pdf_report(
         ("TOPPADDING", (0,0), (-1,-1), 3),
         ("BOTTOMPADDING", (0,0), (-1,-1), 3),
     ]))
-    story.append(meta_table)
-    story.append(Spacer(1, 12))
+    flow.append(meta_table)
+    flow.append(Spacer(1, 12))
 
-    story.append(Paragraph("Extracted Details", h2))
+    flow.append(Paragraph("Extracted Details", h2))
 
-    story.append(Paragraph("Applicability / Affected Aircraft", h3))
+    flow.append(Paragraph("Applicability / Affected Aircraft", h3))
     text = (details.get("affected_aircraft") or "").replace("\n", "<br/>") or "N/A"
-    story.append(Paragraph(text, normal))
-    story.append(Spacer(1, 8))
+    flow.append(Paragraph(text, normal))
+    flow.append(Spacer(1, 8))
 
-    story.append(Paragraph("SB References (from Required Actions)", h3))
+    flow.append(Paragraph("SB References (from Required Actions)", h3))
     sb_list = details.get("sb_references") or []
-    story.append(Paragraph(", ".join(sb_list) if sb_list else "N/A", normal))
-    story.append(Spacer(1, 8))
+    flow.append(Paragraph(", ".join(sb_list) if sb_list else "N/A", normal))
+    flow.append(Spacer(1, 8))
 
     # --- Summaries for (g) and (h) (numbered) ---
-    story.append(Paragraph("Action Items (Summarized)", h3))
+    flow.append(Paragraph("Action Items (Summarized)", h3))
 
     bullets_g, bullets_h = summarize_g_h_sections(
         details.get("required_actions"),
@@ -612,22 +634,22 @@ def build_pdf_report(
 
     if bullets_g:
         for i, b in enumerate(bullets_g, 1):
-            story.append(Paragraph(f"{i}. {b}", normal))
+            flow.append(Paragraph(f"{i}. {b}", normal))
     else:
-        story.append(Paragraph("Required Actions: N/A", normal))
+        flow.append(Paragraph("Required Actions: N/A", normal))
 
-    story.append(Spacer(1, 6))
+    flow.append(Spacer(1, 6))
 
     if bullets_h:
         for i, b in enumerate(bullets_h, 1):
-            story.append(Paragraph(f"{i}. {b}", normal))
+            flow.append(Paragraph(f"{i}. {b}", normal))
     else:
-        story.append(Paragraph("Exceptions: N/A", normal))
+        flow.append(Paragraph("Exceptions: N/A", normal))
 
-    story.append(Spacer(1, 10))
+    flow.append(Spacer(1, 10))
 
     # Required Actions + Exceptions (raw text, unchanged)
-    story.append(Paragraph("Required Actions", h3))
+    flow.append(Paragraph("Required Actions", h3))
     ra_text = (details.get("required_actions") or "").strip()
     ex_text = (details.get("exceptions") or "").strip()
     parts = []
@@ -636,19 +658,19 @@ def build_pdf_report(
     if ex_text and ex_text.upper() != "N/A":
         parts.append(f"<br/><b>(h) Exceptions to Service Information Specifications</b><br/>{ex_text.replace('\n','<br/>')}")
     combined = "<br/><br/>".join(parts) if parts else "N/A"
-    story.append(Paragraph(combined, normal))
-    story.append(Spacer(1, 8))
+    flow.append(Paragraph(combined, normal))
+    flow.append(Spacer(1, 8))
 
-    story.append(Paragraph("Compliance Deadlines", h3))
+    flow.append(Paragraph("Compliance Deadlines", h3))
     ct_text = (details.get("compliance_times") or "").replace("\n", "<br/>") or "N/A"
-    story.append(Paragraph(ct_text, normal))
-    story.append(Spacer(1, 8))
+    flow.append(Paragraph(ct_text, normal))
+    flow.append(Spacer(1, 8))
 
-    # ------------------- Responsive Compliance Records Table -------------------
-    story.append(Paragraph("Compliance Records", h2))
+    # ------------------- Compliance Records Table -------------------
+    flow.append(Paragraph("Compliance Records", h2))
     records_list = records or []
     if not records_list:
-        story.append(Paragraph("No compliance records added.", normal))
+        flow.append(Paragraph("No compliance records added.", normal))
     else:
         header = [
             "Status", "Method", "Details",
@@ -658,9 +680,9 @@ def build_pdf_report(
 
         from xml.sax.saxutils import escape as xml_escape
         def P(text):
-            return Paragraph(xml_escape(str(text)) if text is not None else "", small)
+            return Paragraph(xml_escape(str(text)) if text is not None else "", ParagraphStyle("small", parent=normal, fontSize=9, leading=12, textColor=colors.grey))
 
-        rows = [[Paragraph(label, ParagraphStyle("th", parent=small, fontName="Helvetica-Bold")) for label in header]]
+        rows = [[Paragraph(label, ParagraphStyle("th", parent=normal, fontName="Helvetica-Bold", fontSize=9)) for label in header]]
 
         for rec in records_list:
             next_due = rec.get("next_due") or {}
@@ -689,10 +711,11 @@ def build_pdf_report(
                 P(nd_text),
             ])
 
+        # width calc needs doc width; assume standard A4 with margins ~ we’ll set column widths proportionally to a 170mm area
+        avail = 170 * mm
         weights = [8, 12, 14, 14, 12, 8, 6, 6, 8, 10, 10, 12]
-        total = sum(weights)
-        avail = doc.width
-        col_widths = [avail * w / total for w in weights]
+        total_w = sum(weights)
+        col_widths = [avail * w / total_w for w in weights]
 
         table = Table(rows, colWidths=col_widths, repeatRows=1, hAlign="LEFT")
         table.setStyle(TableStyle([
@@ -705,21 +728,73 @@ def build_pdf_report(
             ("BOX",       (0,0), (-1,-1), 0.5, colors.grey),
             ("INNERGRID", (0,0), (-1,-1), 0.25, colors.grey),
         ]))
-        story.append(table)
+        flow.append(table)
     # --------------------------------------------------------------------------
 
-    story.append(Spacer(1, 18))
-    story.append(Paragraph("Generated by Feras Aviation AD Compliance Checker", small))
+    flow.append(Spacer(1, 12))
 
-    # --- Compliance Status Section (added just before the stamp) ---
-    story.append(Spacer(1, 12))
-    story.append(Paragraph(f"Compliance status as of {compliance_status_date}", h2))
-    story.append(Paragraph(
+    # --- Compliance Status as of + Regulatory statement (before stamp) ---
+    flow.append(Paragraph(f"Compliance status as of: <b>{compliance_status_date.strftime('%d-%m-%Y')}</b>", normal))
+    flow.append(Spacer(1, 6))
+    flow.append(Paragraph(
         "This compliance check was carried out with reference to the regulatory framework "
-        "EASA Part-M / FAA 14 CFR Part 39.",
+        "<b>EASA Part-M</b> and <b>FAA 14 CFR Part 39</b>.",
         normal
     ))
-    story.append(Spacer(1, 12))
+    flow.append(Spacer(1, 18))
+    flow.append(Paragraph("Generated by Feras Aviation AD Compliance Checker", ParagraphStyle("small2", parent=normal, fontSize=9, textColor=colors.grey)))
+    # ----------------------------------------------------------------------
+
+    return flow
+
+# -----------------------------
+# Single-AD PDF report builder
+# -----------------------------
+def build_pdf_report(
+    ad_data: dict,
+    details: dict,
+    records: list,
+    logo_url: str,
+    site_url: str,
+    customer: str,
+    aircraft: str,
+    ata_chapter: str | None,
+    compliance_status_date: date,
+    stamp_bytes: bytes | None = None,
+    stamp_path_or_url: str | None = None
+) -> bytes:
+    if not REPORTLAB_AVAILABLE:
+        raise RuntimeError("ReportLab is not installed. Add 'reportlab' to your requirements.txt.")
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        leftMargin=16*mm,
+        rightMargin=16*mm,
+        topMargin=16*mm,
+        bottomMargin=16*mm,
+        title=f"AD Report - {ad_data.get('document_number') or 'Unknown'}",
+        author="Feras Aviation AD Compliance Checker",
+    )
+
+    styles = getSampleStyleSheet()
+    story = []
+
+    # Build the section flowables (with logo/site at top)
+    story.extend(_make_ad_section_flowables(
+        styles=styles,
+        ad_data=ad_data,
+        details=details,
+        records=records,
+        logo_url=logo_url,
+        site_url=site_url,
+        customer=customer,
+        aircraft=aircraft,
+        ata_chapter=ata_chapter,
+        compliance_status_date=compliance_status_date,
+        add_logo_and_site=True
+    ))
 
     # ---- Stamp on its own page & scaled to fit ----
     stamp_flowable = _image_flowable_fit(
@@ -730,8 +805,8 @@ def build_pdf_report(
     )
     if stamp_flowable:
         story.append(PageBreak())
-        story.append(Spacer(1, 12))
-        story.append(Paragraph("Approval Stamp", h2))
+        styles2 = getSampleStyleSheet()
+        story.append(Paragraph("Approval Stamp", styles2["Heading2"]))
         story.append(Spacer(1, 12))
         story.append(stamp_flowable)
     # ----------------------------------------------
@@ -741,7 +816,122 @@ def build_pdf_report(
     return buf.getvalue()
 
 # -----------------------------
-# Main flow
+# Batch PDF report builder (multiple ADs -> one PDF)
+# -----------------------------
+def build_batch_pdf(
+    ad_numbers: list[str],
+    logo_url: str,
+    site_url: str,
+    customer: str,
+    compliance_status_date: date,
+    stamp_bytes: bytes | None = None,
+    stamp_path_or_url: str | None = None
+) -> bytes:
+    if not REPORTLAB_AVAILABLE:
+        raise RuntimeError("ReportLab is not installed. Add 'reportlab' to your requirements.txt.")
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        leftMargin=16*mm,
+        rightMargin=16*mm,
+        topMargin=16*mm,
+        bottomMargin=16*mm,
+        title="Combined AD Report",
+        author="Feras Aviation AD Compliance Checker",
+    )
+
+    styles = getSampleStyleSheet()
+    story = []
+
+    first_section = True
+
+    for ad_no in ad_numbers:
+        try:
+            ad_data = fetch_ad_data(ad_no)
+            if not ad_data:
+                # Add a small placeholder page for missing AD
+                if not first_section:
+                    story.append(PageBreak())
+                story.append(Paragraph(f"AD {ad_no}", styles["Heading1"]))
+                story.append(Spacer(1, 6))
+                story.append(Paragraph("No data found for this AD.", styles["BodyText"]))
+                first_section = False
+                continue
+
+            ad_data["ad_number"] = ad_no
+
+            api_doc = fetch_document_json(ad_data.get("document_number"))
+            details = extract_details(ad_data["html_url"], api_doc)
+
+            # Resolve effective date display (dd-mm-yyyy)
+            api_eff_field_iso = (ad_data.get("effective_date") or "").strip()
+            effective_resolved_iso = api_eff_field_iso if api_eff_field_iso and api_eff_field_iso.upper() != "N/A" else None
+            if not effective_resolved_iso:
+                effective_resolved_iso = extract_effective_from_api_document(
+                    api_doc,
+                    html_fallback_text=details.get("_full_html_text", "")
+                )
+            eff_display = to_ddmmyyyy(effective_resolved_iso) or to_ddmmyyyy(api_eff_field_iso)
+            if eff_display:
+                ad_data["effective_date"] = eff_display
+
+            # ATA
+            detected_ata = detect_ata_from_subject(details.get("_full_html_text",""))
+            if not detected_ata:
+                detected_ata = detect_ata_fallback(details.get("_full_html_text",""), details.get("sb_references"))
+
+            # Aircraft for report from last compliance entry if exists (batch: typically none)
+            aircraft_for_report = ""
+
+            # Page break between sections
+            if not first_section:
+                story.append(PageBreak())
+
+            story.extend(_make_ad_section_flowables(
+                styles=styles,
+                ad_data=ad_data,
+                details=details,
+                records=[],  # batch mode: no per-AD compliance records unless you later want to feed them
+                logo_url=logo_url,
+                site_url=site_url,
+                customer=customer,
+                aircraft=aircraft_for_report,
+                ata_chapter=detected_ata,
+                compliance_status_date=compliance_status_date,
+                add_logo_and_site=True
+            ))
+
+            first_section = False
+        except Exception as ex:
+            # Ensure one page per AD even on failure
+            if not first_section:
+                story.append(PageBreak())
+            story.append(Paragraph(f"AD {ad_no}", styles["Heading1"]))
+            story.append(Spacer(1, 6))
+            story.append(Paragraph(f"Failed to process AD: {ex}", styles["BodyText"]))
+            first_section = False
+
+    # Add a single stamp page at the end
+    stamp_flowable = _image_flowable_fit(
+        source_bytes=stamp_bytes,
+        path_or_url=stamp_path_or_url if stamp_bytes is None else None,
+        max_w_mm=60,
+        max_h_mm=60
+    )
+    if stamp_flowable:
+        story.append(PageBreak())
+        story.append(Paragraph("Approval Stamp", styles["Heading2"]))
+        story.append(Spacer(1, 12))
+        story.append(stamp_flowable)
+
+    doc.build(story)
+    buf.seek(0)
+    return buf.getvalue()
+
+# -----------------------------
+# Main flow (Single AD)
 # -----------------------------
 if ad_number:
     with st.spinner("🔍 Searching Federal Register..."):
@@ -953,7 +1143,7 @@ if ad_number:
             )
 
         # -----------------------------
-        # PDF Report Download
+        # PDF Report Download (Single)
         # -----------------------------
         st.divider()
         st.subheader("📄 Generate PDF Report")
@@ -995,3 +1185,36 @@ if ad_number:
 
     else:
         st.error("❌ AD not found. Please check the number exactly as it appears (e.g., 2025-01-01).")
+
+# -----------------------------
+# Batch PDF action (multiple ADs)
+# -----------------------------
+st.divider()
+st.subheader("🧾 Generate Combined PDF for Uploaded AD List")
+if ad_list:
+    if REPORTLAB_AVAILABLE:
+        if st.button("Generate Combined PDF Report"):
+            try:
+                stamp_bytes_data = stamp_file.read() if stamp_file is not None else None
+                pdf_bytes = build_batch_pdf(
+                    ad_numbers=ad_list,
+                    logo_url=LOGO_URL,
+                    site_url=SITE_URL,
+                    customer=customer_for_report,
+                    compliance_status_date=compliance_status_date,
+                    stamp_bytes=stamp_bytes_data,
+                    stamp_path_or_url=stamp_path_or_url if stamp_bytes_data is None else None
+                )
+                st.download_button(
+                    "Download Combined AD Report (PDF)",
+                    data=pdf_bytes,
+                    file_name="Combined_AD_Report.pdf",
+                    mime="application/pdf",
+                )
+            except Exception as e:
+                st.error(f"Failed to create combined PDF: {e}")
+    else:
+        st.warning(
+            "Combined PDF generation requires the 'reportlab' package. "
+            "Add `reportlab` to your requirements.txt (and `Pillow` for image handling)."
+        )
