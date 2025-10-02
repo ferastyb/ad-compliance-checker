@@ -852,6 +852,111 @@ def build_tally_pdf(
 
 
 # -----------------------------
+# Helpers: build records from "Records" sheet rows (Option B)
+# -----------------------------
+def _coerce_int(val) -> Optional[int]:
+    try:
+        if pd.isna(val):
+            return None
+    except Exception:
+        pass
+    try:
+        return int(val)
+    except Exception:
+        try:
+            return int(float(val))
+        except Exception:
+            return None
+
+def _coerce_str(val) -> str:
+    try:
+        if pd.isna(val):
+            return ""
+    except Exception:
+        pass
+    return str(val)
+
+def _coerce_bool_from_yn(val) -> bool:
+    s = _coerce_str(val).strip().lower()
+    return s in {"y", "yes", "true", "1"}
+
+def _parse_methods(val) -> List[str]:
+    s = _coerce_str(val)
+    if not s:
+        return []
+    parts = [p.strip() for p in re.split(r"[;,/]", s) if p.strip()]
+    return parts
+
+def build_records_for_ad(ad_no: str, df_records: pd.DataFrame) -> List[Dict]:
+    """
+    Expect df_records columns (case-insensitive accepted):
+    AD Number, Status, Method, Method Other, Applic Aircraft, Serials,
+    Performed Date, Performed Hours, Performed Cycles,
+    Repetitive, Interval Value, Interval Unit, Basis
+    """
+    if df_records is None or df_records.empty:
+        return []
+
+    # Normalize columns
+    colmap = {}
+    for c in df_records.columns:
+        lc = str(c).strip().lower()
+        colmap[lc] = c
+
+    records = []
+    for _, row in df_records.iterrows():
+        row_ad = _coerce_str(row.get(colmap.get("ad number", "AD Number"), ""))
+        if row_ad.strip() != ad_no:
+            continue
+
+        status         = _coerce_str(row.get(colmap.get("status", "Status"), ""))
+        method         = _parse_methods(row.get(colmap.get("method", "Method"), ""))
+        method_other   = _coerce_str(row.get(colmap.get("method other", "Method Other"), ""))
+        applic_air     = _coerce_str(row.get(colmap.get("applic aircraft", "Applic Aircraft"), ""))
+        serials        = _coerce_str(row.get(colmap.get("serials", "Serials"), ""))
+        date_val       = _coerce_str(row.get(colmap.get("performed date", "Performed Date"), ""))
+        hours_val      = _coerce_int(row.get(colmap.get("performed hours", "Performed Hours")))
+        cycles_val     = _coerce_int(row.get(colmap.get("performed cycles", "Performed Cycles")))
+        repetitive     = _coerce_bool_from_yn(row.get(colmap.get("repetitive", "Repetitive")))
+        interval_value = _coerce_int(row.get(colmap.get("interval value", "Interval Value")))
+        interval_unit  = _coerce_str(row.get(colmap.get("interval unit", "Interval Unit")))
+        basis          = _coerce_str(row.get(colmap.get("basis", "Basis")))
+
+        rec = {
+            "ad_number": ad_no,
+            "document_number": None,
+            "status": status,
+            "method": method,
+            "method_other": method_other,
+            "applic_aircraft": applic_air,
+            "applic_serials": serials,
+            "performed_date": date_val or None,
+            "performed_hours": hours_val,
+            "performed_cycles": cycles_val,
+            "repetitive": repetitive,
+            "rep_interval_value": interval_value if repetitive else None,
+            "rep_interval_unit": interval_unit if repetitive else None,
+            "rep_basis": basis if repetitive else None,
+            "next_due": None,
+        }
+
+        # Compute next_due similar to UI logic
+        next_due = {}
+        if repetitive:
+            if interval_unit.lower() == "hours" and hours_val is not None and interval_value is not None:
+                next_due["hours"] = hours_val + interval_value
+            if interval_unit.lower() == "cycles" and cycles_val is not None and interval_value is not None:
+                next_due["cycles"] = cycles_val + interval_value
+            if interval_unit.lower() in {"days", "months", "years"} and interval_value is not None:
+                next_due["calendar"] = f"+{interval_value} {interval_unit} ({basis})"
+        rec["next_due"] = next_due or None
+
+        records.append(rec)
+
+    return records
+
+
+# -----------------------------
 # Main flow (single AD)
 # -----------------------------
 if ad_number:
@@ -1108,12 +1213,17 @@ if ad_number:
 
 
 # -----------------------------
-# 📦 Batch Mode (Excel → merged PDF)
+# 📦 Batch Mode (Excel → merged PDF) — Option B
 # -----------------------------
 st.divider()
 st.subheader("📦 Batch Mode (Excel → merged PDF)")
-st.caption("Upload an .xlsx with a column named **AD Number**. Optional columns: **Customer**, **Aircraft**.")
-xlsx = st.file_uploader("Upload AD list (.xlsx)", type=["xlsx"], key="batch_xlsx")
+st.caption("""
+Upload an .xlsx with:
+- Sheet 1: AD list containing a column named **AD Number**. Optional columns: **Customer**, **Aircraft**.
+- Sheet 2: **Records** with columns: **AD Number, Status, Method, Method Other, Applic Aircraft, Serials, Performed Date, Performed Hours, Performed Cycles, Repetitive, Interval Value, Interval Unit, Basis**.
+Multiple rows per AD Number are allowed to add multiple records per AD.
+""")
+xlsx = st.file_uploader("Upload AD workbook (.xlsx)", type=["xlsx"], key="batch_xlsx")
 
 if xlsx is not None and (not PANDAS_AVAILABLE or not PYPDF2_AVAILABLE or not REPORTLAB_AVAILABLE):
     missing = []
@@ -1125,126 +1235,139 @@ if xlsx is not None and (not PANDAS_AVAILABLE or not PYPDF2_AVAILABLE or not REP
 if xlsx is not None and PANDAS_AVAILABLE and PYPDF2_AVAILABLE and REPORTLAB_AVAILABLE:
     if st.button("Generate merged PDF with tally"):
         try:
-            df = pd.read_excel(xlsx)  # requires openpyxl installed
+            # Read all sheets so we can access the 'Records' sheet
+            sheets = pd.read_excel(xlsx, sheet_name=None)  # requires openpyxl
         except Exception as e:
             st.error(f"Failed to read Excel file: {e}")
-            df = None
+            sheets = None
 
-        if df is not None:
-            # try to find AD column
-            ad_col = None
-            for c in df.columns:
-                if str(c).strip().lower() in {"ad number", "ad_number", "ad"}:
-                    ad_col = c
-                    break
-            if ad_col is None:
-                st.error("No column named 'AD Number' found.")
+        if sheets is not None:
+            # Find main sheet (first sheet by order)
+            if len(sheets) == 0:
+                st.error("The workbook is empty.")
             else:
-                merger = PdfMerger()
-                tally_rows = []
+                # First sheet is AD list
+                first_sheet_name = list(sheets.keys())[0]
+                df_main = sheets[first_sheet_name]
+                df_records = sheets.get("Records", None)
 
-                # Prepare stamp bytes once
-                tally_stamp_bytes = stamp_file.read() if stamp_file is not None else None
-                tally_stamp_url = stamp_path_or_url if tally_stamp_bytes is None else None
+                # try to find AD column
+                ad_col = None
+                for c in df_main.columns:
+                    if str(c).strip().lower() in {"ad number", "ad_number", "ad"}:
+                        ad_col = c
+                        break
+                if ad_col is None:
+                    st.error(f"No column named 'AD Number' found in sheet '{first_sheet_name}'.")
+                else:
+                    merger = PdfMerger()
+                    tally_rows = []
 
-                for idx, row in df.iterrows():
-                    ad_no = str(row[ad_col]).strip()
-                    if not ad_no or ad_no.lower() == "nan":
-                        continue
+                    # Prepare stamp bytes once (used for each single report & tally)
+                    tally_stamp_bytes = stamp_file.read() if stamp_file is not None else None
+                    tally_stamp_url = stamp_path_or_url if tally_stamp_bytes is None else None
 
-                    row_customer = ""
-                    row_aircraft = ""
-                    # optional columns
-                    for col in df.columns:
-                        cl = str(col).strip().lower()
-                        if cl == "customer":
-                            row_customer = str(row[col]) if not pd.isna(row[col]) else ""
-                        if cl == "aircraft":
-                            row_aircraft = str(row[col]) if not pd.isna(row[col]) else ""
+                    # Iterate ADs
+                    for idx, row in df_main.iterrows():
+                        ad_no = str(row[ad_col]).strip()
+                        if not ad_no or ad_no.lower() == "nan":
+                            continue
 
-                    # fetch + build each PDF
-                    data = fetch_ad_data(ad_no)
-                    if not data:
-                        st.warning(f"Skipping {ad_no}: not found.")
-                        continue
-                    data["ad_number"] = ad_no
-                    api_doc = fetch_document_json(data.get("document_number"))
-                    details = extract_details(data['html_url'], api_doc)
+                        row_customer = ""
+                        row_aircraft = ""
+                        # optional columns
+                        for col in df_main.columns:
+                            cl = str(col).strip().lower()
+                            if cl == "customer":
+                                v = row[col]
+                                row_customer = "" if (isinstance(v, float) and pd.isna(v)) else str(v)
+                            if cl == "aircraft":
+                                v = row[col]
+                                row_aircraft = "" if (isinstance(v, float) and pd.isna(v)) else str(v)
 
-                    detected_ata = detect_ata_from_subject(details.get("_full_html_text",""))
-                    if not detected_ata:
-                        detected_ata = detect_ata_fallback(details.get("_full_html_text",""), details.get("sb_references"))
+                        # fetch AD data
+                        data = fetch_ad_data(ad_no)
+                        if not data:
+                            st.warning(f"Skipping {ad_no}: not found.")
+                            continue
+                        data["ad_number"] = ad_no
+                        api_doc = fetch_document_json(data.get("document_number"))
+                        details = extract_details(data['html_url'], api_doc)
 
-                    # Resolve effective date
-                    api_eff_field_iso = (data.get("effective_date") or "").strip()
-                    effective_resolved_iso = api_eff_field_iso if api_eff_field_iso and api_eff_field_iso.upper() != "N/A" else None
-                    if not effective_resolved_iso:
-                        effective_resolved_iso = extract_effective_from_api_document(
-                            api_doc,
-                            html_fallback_text=details.get("_full_html_text", "")
-                        )
-                    eff_display = to_ddmmyyyy(effective_resolved_iso) or to_ddmmyyyy(api_eff_field_iso)
-                    if eff_display:
-                        data["effective_date"] = eff_display
+                        detected_ata = detect_ata_from_subject(details.get("_full_html_text",""))
+                        if not detected_ata:
+                            detected_ata = detect_ata_fallback(details.get("_full_html_text",""), details.get("sb_references"))
 
-                    # Single report PDF in-memory
+                        # Resolve effective date
+                        api_eff_field_iso = (data.get("effective_date") or "").strip()
+                        effective_resolved_iso = api_eff_field_iso if api_eff_field_iso and api_eff_field_iso.upper() != "N/A" else None
+                        if not effective_resolved_iso:
+                            effective_resolved_iso = extract_effective_from_api_document(
+                                api_doc,
+                                html_fallback_text=details.get("_full_html_text", "")
+                            )
+                        eff_display = to_ddmmyyyy(effective_resolved_iso) or to_ddmmyyyy(api_eff_field_iso)
+                        if eff_display:
+                            data["effective_date"] = eff_display
+
+                        # Build compliance records from Records sheet (Option B)
+                        records_for_this_ad = []
+                        if df_records is not None and not df_records.empty:
+                            try:
+                                records_for_this_ad = build_records_for_ad(ad_no, df_records)
+                            except Exception as e:
+                                st.warning(f"Failed to parse records for {ad_no}: {e}")
+
+                        # Single report PDF in-memory (including records)
+                        try:
+                            pdf_bytes = build_pdf_report(
+                                ad_data=data,
+                                details=details,
+                                records=records_for_this_ad,
+                                logo_url=LOGO_URL,
+                                site_url=SITE_URL,
+                                customer=row_customer or customer_for_report,
+                                aircraft=row_aircraft,
+                                ata_chapter=detected_ata,
+                                stamp_bytes=tally_stamp_bytes,
+                                stamp_path_or_url=tally_stamp_url
+                            )
+                            merger.append(io.BytesIO(pdf_bytes))
+                        except Exception as e:
+                            st.warning(f"Failed to build PDF for {ad_no}: {e}")
+                            continue
+
+                        # Add to tally
+                        tally_rows.append({
+                            "ad_number": ad_no,
+                            "document_number": data.get("document_number", ""),
+                            "title": data.get("title", "") or "",
+                            "publication_date": data.get("publication_date", "") or "",
+                            "effective_date": data.get("effective_date", "") or "N/A",
+                            "ata": detected_ata or "",
+                        })
+
+                    # Build tally sheet PDF and append to merger
                     try:
-                        pdf_bytes = build_pdf_report(
-                            ad_data=data,
-                            details=details,
-                            records=[],  # batch: no interactive records by default
-                            logo_url=LOGO_URL,
+                        tally_pdf = build_tally_pdf(
+                            rows=tally_rows,
+                            logo_url=LOGO_URL,     # preserve AR on tally via helper
                             site_url=SITE_URL,
-                            customer=row_customer or customer_for_report,
-                            aircraft=row_aircraft,
-                            ata_chapter=detected_ata,
                             stamp_bytes=tally_stamp_bytes,
                             stamp_path_or_url=tally_stamp_url
                         )
-                        merger.append(io.BytesIO(pdf_bytes))
+                        merger.append(io.BytesIO(tally_pdf))
                     except Exception as e:
-                        st.warning(f"Failed to build PDF for {ad_no}: {e}")
-                        continue
+                        st.warning(f"Failed to build/append tally sheet: {e}")
 
-                    # Add to tally
-                    tally_rows.append({
-                        "ad_number": ad_no,
-                        "document_number": data.get("document_number", ""),
-                        "title": data.get("title", "") or "",
-                        "publication_date": data.get("publication_date", "") or "",
-                        "effective_date": data.get("effective_date", "") or "N/A",
-                        "ata": detected_ata or "",
-                    })
-
-                # Build tally sheet PDF and append to merger
-                try:
-                    tally_pdf = build_tally_pdf(
-                        rows=tally_rows,
-                        logo_url=LOGO_URL,     # preserve AR on tally via helper
-                        site_url=SITE_URL,
-                        stamp_bytes=tally_stamp_bytes,
-                        stamp_path_or_url=tally_stamp_url
+                    # Output merged
+                    out_buf = io.BytesIO()
+                    merger.write(out_buf)
+                    merger.close()
+                    out_buf.seek(0)
+                    st.download_button(
+                        "Download Merged PDF (with tally)",
+                        data=out_buf.getvalue(),
+                        file_name="AD_Merged_Report.pdf",
+                        mime="application/pdf",
                     )
-                    merger.append(io.BytesIO(tally_pdf))
-                except Exception as e:
-                    st.warning(f"Failed to build/append tally sheet: {e}")
-
-                # Output merged
-                out_buf = io.BytesIO()
-                merger.write(out_buf)
-                merger.close()
-                out_buf.seek(0)
-                st.download_button(
-                    "Download Merged PDF (with tally)",
-                    data=out_buf.getvalue(),
-                    file_name="AD_Merged_Report.pdf",
-                    mime="application/pdf",
-                )
-
-
-# -----------------------------
-# Proposal: add compliance records per AD in batch
-# -----------------------------
-st.markdown("""
-
-""", unsafe_allow_html=True)
