@@ -126,6 +126,7 @@ def slice_letter_block(full_text: str, letter: str) -> str | None:
         return body if body else None
     return None
 
+# SB code pattern & helpers
 SB_CODE_RE = re.compile(r"\b[A-Z0-9]+(?:-[A-Z0-9]+)*-SB[0-9A-Z]+(?:-[0-9A-Z]+)*\b", re.IGNORECASE)
 def find_sb_refs(text: str) -> list[str]:
     if not text:
@@ -138,8 +139,22 @@ def find_sb_refs(text: str) -> list[str]:
             out.append(r)
     return out
 
+def ata_from_sb_code(sb_code: str) -> str | None:
+    """
+    Extract the two digits immediately after 'SB' in an SB code, e.g.:
+    '...-SB420045-00' -> '42'
+    """
+    m = re.search(r"-SB(\d{2})", sb_code, flags=re.IGNORECASE)
+    if m:
+        return m.group(1)
+    # If pattern SB + >2 digits appears, still take first two
+    m2 = re.search(r"-SB(\d{2})\d+", sb_code, flags=re.IGNORECASE)
+    if m2:
+        return m2.group(1)
+    return None
+
 # -----------------------------
-# ATA Chapter detection (from (d) Subject first)
+# ATA Chapter detection (Subject -> SB-based -> other heuristics)
 # -----------------------------
 ATA_FROM_SUBJECT_RE = re.compile(
     r"\b(?:JASC\/)?ATA(?:\s*chapter)?\s*[:\-]?\s*(\d{2})(?:[.\- ]?\d{2})?\b",
@@ -171,23 +186,25 @@ ATA_KEYWORD_HINTS = [
     (r"\bair conditioning\b", "21"),
 ]
 def detect_ata_fallback(full_text: str, sb_refs: list[str] | None = None) -> str | None:
-    if not full_text:
-        return None
-    t = full_text.replace("\u00a0", " ")
-    cands = [m.group(1) if not m.group(2) else f"{m.group(1)}-{m.group(2)}"
-             for m in ATA_DIRECT_RE.finditer(t)]
-    if cands:
-        from collections import Counter
-        return Counter(cands).most_common(1)[0][0]
+    # 1) Prefer SB-based ATA: first two digits after 'SB'
     if sb_refs:
         for ref in sb_refs:
-            m = re.search(r"-(\d{2})-", ref)
-            if m:
-                return m.group(1)
-    tl = t.lower()
-    for pat, code in ATA_KEYWORD_HINTS:
-        if re.search(pat, tl):
-            return code
+            ata = ata_from_sb_code(ref)
+            if ata:
+                return ata
+    # 2) Direct mentions like "ATA 25"
+    if full_text:
+        t = full_text.replace("\u00a0", " ")
+        cands = [m.group(1) if not m.group(2) else f"{m.group(1)}-{m.group(2)}"
+                 for m in ATA_DIRECT_RE.finditer(t)]
+        if cands:
+            from collections import Counter
+            return Counter(cands).most_common(1)[0][0]
+        # 3) Keyword hints
+        tl = t.lower()
+        for pat, code in ATA_KEYWORD_HINTS:
+            if re.search(pat, tl):
+                return code
     return None
 
 # -----------------------------
@@ -195,8 +212,8 @@ def detect_ata_fallback(full_text: str, sb_refs: list[str] | None = None) -> str
 # -----------------------------
 def summarize_g_h_sections(req_text: str | None, exc_text: str | None) -> tuple[list[str], list[str]]:
     """
-    Produce structured bullet points for (g) Required Actions and (h) Exceptions,
-    tuned to FAA AD phrasing (e.g., AD 2020-06-14).
+    Produce structured, numbered bullet points for (g) Required Actions and (h) Exceptions,
+    tuned to FAA AD phrasing (e.g., AD 2020-06-14). Also echoes Issue number in (h) when present.
     """
     bullets_g, bullets_h = [], []
 
@@ -204,18 +221,16 @@ def summarize_g_h_sections(req_text: str | None, exc_text: str | None) -> tuple[
     if req_text and req_text.strip().upper() != "N/A":
         t = req_text.strip()
 
-        # Pull the SB reference if present (reuse our SB regex)
+        # Pull SB reference(s)
         sb_refs = find_sb_refs(t)
         sb_ref = sb_refs[0] if sb_refs else "the referenced Service Bulletin"
 
         # Pull Issue number and Service Bulletin date if present
         issue = None
         issue_date = None
-
         m_issue = re.search(r"\bIssue\s+([0-9A-Za-z]+)\b", t, flags=re.IGNORECASE)
         if m_issue:
             issue = m_issue.group(1)
-
         m_date = re.search(r"\bdated\s+([A-Za-z]+\s+\d{1,2},\s*\d{4})\b", t, flags=re.IGNORECASE)
         if m_date:
             issue_date = m_date.group(1)
@@ -229,7 +244,7 @@ def summarize_g_h_sections(req_text: str | None, exc_text: str | None) -> tuple[
         elif issue_date:
             sb_phrase = f"{sb_ref}, dated {issue_date}"
 
-        # Detect RC, Compliance paragraph, and "except as specified by paragraph (h)"
+        # Detect RC, Compliance paragraph, and (h) exception mention
         has_rc = bool(re.search(r"\bRC\b", t))
         mentions_compliance_para_5 = bool(re.search(r"\bparagraph\s*5\b.*\bCompliance\b", t, flags=re.IGNORECASE))
         mentions_h_exception = bool(re.search(r"\bparagraph\s*\(?h\)?\b", t, flags=re.IGNORECASE)) or \
@@ -241,41 +256,44 @@ def summarize_g_h_sections(req_text: str | None, exc_text: str | None) -> tuple[
                 f"Perform all actions labeled 'RC' (required for compliance) in the Accomplishment Instructions of {sb_phrase}."
             )
         else:
-            # if RC not explicitly found, still direct to Accomplishment Instructions of the SB
             bullets_g.append(
-                f"Accomplish the actions in the Accomplishment Instructions of {sb_phrase}."
+                f"Accomplish the required actions in the Accomplishment Instructions of {sb_phrase}."
             )
 
         if mentions_compliance_para_5:
             bullets_g.append("Follow the timing in paragraph 5, 'Compliance,' of the same service bulletin.")
         else:
-            # Generic timing wording if para 5 not explicitly mentioned
             bullets_g.append("Follow the compliance times specified in the service bulletin.")
 
         bullets_g.append("Do the actions in accordance with that SB’s procedures and specifications.")
 
         if mentions_h_exception:
             bullets_g.append("Actions are required except where modified by paragraph (h) of this AD.")
-        else:
-            # If (h) not referenced, omit that bullet to avoid implying it exists
-            pass
 
     # --------- (h) Exceptions ----------
     if exc_text and exc_text.strip().upper() != "N/A":
         t = exc_text.strip()
-        # Look for the Issue-date substitution pattern
+
+        # Detect specific "Issue X date" substitution and echo Issue number when found
+        m_issue_mention = re.search(r"\bIssue\s+([0-9A-Za-z]+)\b", t, flags=re.IGNORECASE)
+        issue_in_h = m_issue_mention.group(1) if m_issue_mention else None
+
         refers_issue_date = bool(re.search(r"\bIssue\b.*\bdate\b", t, flags=re.IGNORECASE))
         mentions_effective_date = bool(re.search(r"\beffective date\b", t, flags=re.IGNORECASE))
         mentions_sb_phrase = bool(re.search(r"\bservice bulletin\b", t, flags=re.IGNORECASE))
 
         if refers_issue_date and mentions_effective_date and mentions_sb_phrase:
-            bullets_h.append(
-                "Where the Service Bulletin refers to 'the Issue date of this Service Bulletin,' substitute 'the effective date of this AD.'"
-            )
+            if issue_in_h:
+                bullets_h.append(
+                    f"Where the Service Bulletin refers to 'the Issue {issue_in_h} date of this Service Bulletin,' substitute 'the effective date of this AD.'"
+                )
+            else:
+                bullets_h.append(
+                    "Where the Service Bulletin refers to 'the Issue date of this Service Bulletin,' substitute 'the effective date of this AD.'"
+                )
             bullets_h.append("All other Service Bulletin instructions remain unchanged.")
         else:
-            # Generic exception paraphrase if not a date-substitution exception
-            # Keep it concise and action-oriented
+            # Generic exception paraphrase if not the date-substitution pattern
             sentences = re.split(r'(?<=[.!?])\s+', t)
             for s in sentences:
                 s = s.strip()
@@ -580,7 +598,7 @@ def build_pdf_report(
     story.append(Paragraph(", ".join(sb_list) if sb_list else "N/A", normal))
     story.append(Spacer(1, 8))
 
-    # --- Summaries for (g) and (h) ---
+    # --- Summaries for (g) and (h) (numbered) ---
     story.append(Paragraph("Action Items (Summarized)", h3))
 
     bullets_g, bullets_h = summarize_g_h_sections(
@@ -736,6 +754,7 @@ if ad_number:
         with st.spinner("📄 Extracting AD details..."):
             details = extract_details(data['html_url'], api_doc)
 
+        # Determine ATA: subject -> SB-based -> heuristics
         detected_ata = detect_ata_from_subject(details.get("_full_html_text",""))
         if not detected_ata:
             detected_ata = detect_ata_fallback(details.get("_full_html_text",""), details.get("sb_references"))
@@ -761,6 +780,8 @@ if ad_number:
         if eff_display:
             data["effective_date"] = eff_display
 
+        st.subheading = st.subheader  # alias to avoid accidental mistakes later
+
         st.subheader("🛩️ Applicability / Affected Aircraft")
         st.write(details.get("affected_aircraft") or "N/A")
 
@@ -768,20 +789,20 @@ if ad_number:
         sb_list = details.get("sb_references") or []
         st.write(", ".join(sb_list) if sb_list else "N/A")
 
-        # --- New: (g) and (h) structured summaries in UI ---
+        # --- (g) and (h) structured, NUMBERED summaries in UI ---
         st.subheader("🔧 (g) Required Actions — key points")
         bullets_g, bullets_h = summarize_g_h_sections(
             details.get("required_actions"),
             details.get("exceptions")
         )
         if bullets_g:
-            st.markdown("\n".join([f"- {b}" for b in bullets_g]))
+            st.markdown("\n".join([f"{i+1}. {b}" for i, b in enumerate(bullets_g)]))
         else:
             st.write("N/A")
 
         st.subheader("📌 (h) Exception to Service Information Specifications — key points")
         if bullets_h:
-            st.markdown("\n".join([f"- {b}" for b in bullets_h]))
+            st.markdown("\n".join([f"{i+1}. {b}" for i, b in enumerate(bullets_h)]))
         else:
             st.write("N/A")
 
@@ -939,7 +960,7 @@ if ad_number:
                         site_url=SITE_URL,
                         customer=customer_for_report,
                         aircraft=aircraft_for_report,
-                        ata_chapter=ata_chapter if ata_chapter else detected_ata,
+                        ata_chapter=ata_chapter if ata_chapter else detect_ata_fallback(details.get("_full_html_text",""), details.get("sb_references")),
                         stamp_bytes=stamp_bytes_data,
                         stamp_path_or_url=stamp_path_or_url if stamp_bytes_data is None else None
                     )
