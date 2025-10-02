@@ -139,7 +139,7 @@ def find_sb_refs(text: str) -> list[str]:
     return out
 
 # -----------------------------
-# ATA Chapter detection
+# ATA Chapter detection (from (d) Subject first)
 # -----------------------------
 ATA_FROM_SUBJECT_RE = re.compile(
     r"\b(?:JASC\/)?ATA(?:\s*chapter)?\s*[:\-]?\s*(\d{2})(?:[.\- ]?\d{2})?\b",
@@ -191,30 +191,99 @@ def detect_ata_fallback(full_text: str, sb_refs: list[str] | None = None) -> str
     return None
 
 # -----------------------------
-# NEW: Summarizer for (g) and (h)
+# Targeted summarizer for (g) and (h)
 # -----------------------------
 def summarize_g_h_sections(req_text: str | None, exc_text: str | None) -> tuple[list[str], list[str]]:
+    """
+    Produce structured bullet points for (g) Required Actions and (h) Exceptions,
+    tuned to FAA AD phrasing (e.g., AD 2020-06-14).
+    """
     bullets_g, bullets_h = [], []
 
+    # --------- (g) Required Actions ----------
     if req_text and req_text.strip().upper() != "N/A":
-        if "RC" in req_text and "Service Bulletin" in req_text:
-            bullets_g = [
-                "Perform all actions labeled 'RC' (required for compliance) in the Accomplishment Instructions of the referenced Service Bulletin.",
-                "Follow the compliance times specified in paragraph 5, 'Compliance,' of the Service Bulletin.",
-                "Do the actions in accordance with the Service Bulletin instructions.",
-                "These actions are required except where modified by paragraph (h) of this AD."
-            ]
-        else:
-            bullets_g = [req_text.strip()]
+        t = req_text.strip()
 
-    if exc_text and exc_text.strip().upper() != "N/A":
-        if "effective date" in exc_text.lower() and "issue" in exc_text.lower():
-            bullets_h = [
-                "Where the Service Bulletin refers to 'the Issue date of this Service Bulletin,' substitute 'the effective date of this AD.'",
-                "All other Service Bulletin instructions remain unchanged."
-            ]
+        # Pull the SB reference if present (reuse our SB regex)
+        sb_refs = find_sb_refs(t)
+        sb_ref = sb_refs[0] if sb_refs else "the referenced Service Bulletin"
+
+        # Pull Issue number and Service Bulletin date if present
+        issue = None
+        issue_date = None
+
+        m_issue = re.search(r"\bIssue\s+([0-9A-Za-z]+)\b", t, flags=re.IGNORECASE)
+        if m_issue:
+            issue = m_issue.group(1)
+
+        m_date = re.search(r"\bdated\s+([A-Za-z]+\s+\d{1,2},\s*\d{4})\b", t, flags=re.IGNORECASE)
+        if m_date:
+            issue_date = m_date.group(1)
+
+        # Build SB phrase like: "B787-81205-SB420045-00, Issue 002 (February 14, 2020)"
+        sb_phrase = sb_ref
+        if issue and issue_date:
+            sb_phrase = f"{sb_ref}, Issue {issue} ({issue_date})"
+        elif issue:
+            sb_phrase = f"{sb_ref}, Issue {issue}"
+        elif issue_date:
+            sb_phrase = f"{sb_ref}, dated {issue_date}"
+
+        # Detect RC, Compliance paragraph, and "except as specified by paragraph (h)"
+        has_rc = bool(re.search(r"\bRC\b", t))
+        mentions_compliance_para_5 = bool(re.search(r"\bparagraph\s*5\b.*\bCompliance\b", t, flags=re.IGNORECASE))
+        mentions_h_exception = bool(re.search(r"\bparagraph\s*\(?h\)?\b", t, flags=re.IGNORECASE)) or \
+                               bool(re.search(r"\bexcept as specified\b", t, flags=re.IGNORECASE))
+
+        # Construct bullets closely matching your example
+        if has_rc:
+            bullets_g.append(
+                f"Perform all actions labeled 'RC' (required for compliance) in the Accomplishment Instructions of {sb_phrase}."
+            )
         else:
-            bullets_h = [exc_text.strip()]
+            # if RC not explicitly found, still direct to Accomplishment Instructions of the SB
+            bullets_g.append(
+                f"Accomplish the actions in the Accomplishment Instructions of {sb_phrase}."
+            )
+
+        if mentions_compliance_para_5:
+            bullets_g.append("Follow the timing in paragraph 5, 'Compliance,' of the same service bulletin.")
+        else:
+            # Generic timing wording if para 5 not explicitly mentioned
+            bullets_g.append("Follow the compliance times specified in the service bulletin.")
+
+        bullets_g.append("Do the actions in accordance with that SB’s procedures and specifications.")
+
+        if mentions_h_exception:
+            bullets_g.append("Actions are required except where modified by paragraph (h) of this AD.")
+        else:
+            # If (h) not referenced, omit that bullet to avoid implying it exists
+            pass
+
+    # --------- (h) Exceptions ----------
+    if exc_text and exc_text.strip().upper() != "N/A":
+        t = exc_text.strip()
+        # Look for the Issue-date substitution pattern
+        refers_issue_date = bool(re.search(r"\bIssue\b.*\bdate\b", t, flags=re.IGNORECASE))
+        mentions_effective_date = bool(re.search(r"\beffective date\b", t, flags=re.IGNORECASE))
+        mentions_sb_phrase = bool(re.search(r"\bservice bulletin\b", t, flags=re.IGNORECASE))
+
+        if refers_issue_date and mentions_effective_date and mentions_sb_phrase:
+            bullets_h.append(
+                "Where the Service Bulletin refers to 'the Issue date of this Service Bulletin,' substitute 'the effective date of this AD.'"
+            )
+            bullets_h.append("All other Service Bulletin instructions remain unchanged.")
+        else:
+            # Generic exception paraphrase if not a date-substitution exception
+            # Keep it concise and action-oriented
+            sentences = re.split(r'(?<=[.!?])\s+', t)
+            for s in sentences:
+                s = s.strip()
+                if not s:
+                    continue
+                bullets_h.append(s)
+                if len(bullets_h) >= 6:
+                    break
 
     return bullets_g, bullets_h
 
@@ -247,6 +316,7 @@ def fetch_ad_data(ad_number: str):
     except requests.RequestException as e:
         st.error(f"❌ Request failed: {e}")
     return None
+
 def fetch_document_json(document_number: str) -> dict | None:
     if not document_number:
         return None
@@ -342,9 +412,7 @@ def extract_details(ad_html_url: str, api_doc: dict | None):
     exceptions_text = slice_letter_block(full_text, "h")
 
     # SB refs
-    sb_refs = []
-    if req_actions_text:
-        sb_refs = find_sb_refs(req_actions_text)
+    sb_refs = find_sb_refs(req_actions_text) if req_actions_text else []
     if not sb_refs:
         sb_refs = find_sb_refs(full_text)
 
@@ -512,7 +580,7 @@ def build_pdf_report(
     story.append(Paragraph(", ".join(sb_list) if sb_list else "N/A", normal))
     story.append(Spacer(1, 8))
 
-    # --- New: Bullet summaries for (g) and (h) ---
+    # --- Summaries for (g) and (h) ---
     story.append(Paragraph("Action Items (Summarized)", h3))
 
     bullets_g, bullets_h = summarize_g_h_sections(
@@ -535,7 +603,6 @@ def build_pdf_report(
         story.append(Paragraph("Exceptions: N/A", normal))
 
     story.append(Spacer(1, 10))
-    # --- End new block ---
 
     # Required Actions + Exceptions (raw text, unchanged)
     story.append(Paragraph("Required Actions", h3))
@@ -701,20 +768,20 @@ if ad_number:
         sb_list = details.get("sb_references") or []
         st.write(", ".join(sb_list) if sb_list else "N/A")
 
-        # --- New: Bullet summaries in UI (using the targeted summarizer) ---
-        st.subheader("🔧 (g) Required Actions — Summary")
+        # --- New: (g) and (h) structured summaries in UI ---
+        st.subheader("🔧 (g) Required Actions — key points")
         bullets_g, bullets_h = summarize_g_h_sections(
             details.get("required_actions"),
             details.get("exceptions")
         )
         if bullets_g:
-            st.markdown("\n".join([f"{i+1}. {b}" for i, b in enumerate(bullets_g)]))
+            st.markdown("\n".join([f"- {b}" for b in bullets_g]))
         else:
             st.write("N/A")
 
-        st.subheader("📌 (h) Exceptions to Service Information Specifications — Summary")
+        st.subheader("📌 (h) Exception to Service Information Specifications — key points")
         if bullets_h:
-            st.markdown("\n".join([f"{i+1}. {b}" for i, b in enumerate(bullets_h)]))
+            st.markdown("\n".join([f"- {b}" for b in bullets_h]))
         else:
             st.write("N/A")
 
