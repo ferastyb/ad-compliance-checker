@@ -1246,18 +1246,5 @@ if xlsx is not None and PANDAS_AVAILABLE and PYPDF2_AVAILABLE and REPORTLAB_AVAI
 # Proposal: add compliance records per AD in batch
 # -----------------------------
 st.markdown("""
-<details>
-<summary><b>💡 Idea to include compliance records in each AD report (batch)</b></summary>
 
-**Option A (extra columns in the same Excel):**
-- Add optional columns like: <i>Status, Method, Method Other, Applic Aircraft, Serials, Performed Date, Performed Hours, Performed Cycles, Repetitive, Interval Value, Interval Unit, Basis</i>.
-- For multiple records per AD, list them on separate rows repeating the same "AD Number". The generator can group rows by AD Number and include all rows as records in that AD’s PDF.
-
-**Option B (second sheet):**
-- Keep your current AD list in the first sheet.
-- Add a second sheet named <i>Records</i> with a column <i>AD Number</i> linking each record to the AD.
-- Same record columns as above; the app will join per AD and render them in the individual PDFs.
-
-If you want this, tell me which option you prefer and I’ll wire it up.
-</details>
 """, unsafe_allow_html=True)
