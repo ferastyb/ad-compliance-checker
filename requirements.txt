@@ -1,5 +1,8 @@
 streamlit
 requests
 beautifulsoup4
+pandas
+openpyxl
+PyPDF2
 reportlab
-Pillow
+pillow
