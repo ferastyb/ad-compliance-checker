@@ -573,7 +573,7 @@ def build_pdf_report(
 
     if logo_flowable:
         story.append(logo_flowable)
-        story.append(Paragraph("Feras Aviation Technical Services Ltd.", h1))
+        story.append(Paragraph("Feras Aviation Technical Services Ltd.", h2))
     story.append(Paragraph(f'<font size="12"><a href="{site_url}">{site_url}</a></font>', small))
     story.append(Spacer(1, 6))
 
