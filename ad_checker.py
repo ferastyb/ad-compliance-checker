@@ -66,7 +66,8 @@ st.markdown("**PDF Stamp (optional)**")
 stamp_file = st.file_uploader("Upload stamp image (PNG/JPG)", type=["png", "jpg", "jpeg"])
 stamp_path_or_url = st.text_input("Or paste a stamp file path / URL (optional)").strip()
 
-
+# DEMO watermark is always ON
+_ALWAYS_WATERMARK_TEXT = "DEMO"
 
 
 # -----------------------------
@@ -235,21 +236,13 @@ def detect_ata_fallback(full_text: Optional[str], sb_refs: Optional[List[str]] =
 # Targeted summarizer for (g) and (h)
 # -----------------------------
 def summarize_g_h_sections(req_text: Optional[str], exc_text: Optional[str]) -> Tuple[List[str], List[str]]:
-    """
-    Produce structured, numbered bullet points for (g) Required Actions and (h) Exceptions,
-    tuned to FAA AD phrasing (e.g., AD 2020-06-14). Also echoes Issue number in (h) when present.
-    """
     bullets_g, bullets_h = [], []
 
     # --------- (g) Required Actions ----------
     if req_text and req_text.strip().upper() != "N/A":
         t = req_text.strip()
-
-        # Pull SB reference(s)
         sb_refs = find_sb_refs(t)
         sb_ref = sb_refs[0] if sb_refs else "the referenced Service Bulletin"
-
-        # Pull Issue number and Service Bulletin date if present
         issue = None
         issue_date = None
         m_issue = re.search(r"\bIssue\s+([0-9A-Za-z]+)\b", t, flags=re.IGNORECASE)
@@ -259,7 +252,6 @@ def summarize_g_h_sections(req_text: Optional[str], exc_text: Optional[str]) -> 
         if m_date:
             issue_date = m_date.group(1)
 
-        # Build SB phrase
         sb_phrase = sb_ref
         if issue and issue_date:
             sb_phrase = f"{sb_ref}, Issue {issue} ({issue_date})"
@@ -268,13 +260,11 @@ def summarize_g_h_sections(req_text: Optional[str], exc_text: Optional[str]) -> 
         elif issue_date:
             sb_phrase = f"{sb_ref}, dated {issue_date}"
 
-        # Detect RC, Compliance paragraph, and (h) exception mention
         has_rc = bool(re.search(r"\bRC\b", t))
         mentions_compliance_para_5 = bool(re.search(r"\bparagraph\s*5\b.*\bCompliance\b", t, flags=re.IGNORECASE))
         mentions_h_exception = bool(re.search(r"\bparagraph\s*\(?h\)?\b", t, flags=re.IGNORECASE)) or \
                                bool(re.search(r"\bexcept as specified\b", t, flags=re.IGNORECASE))
 
-        # Construct bullets closely matching your example
         if has_rc:
             bullets_g.append(
                 f"Perform all actions labeled 'RC' (required for compliance) in the Accomplishment Instructions of {sb_phrase}."
@@ -297,8 +287,6 @@ def summarize_g_h_sections(req_text: Optional[str], exc_text: Optional[str]) -> 
     # --------- (h) Exceptions ----------
     if exc_text and exc_text.strip().upper() != "N/A":
         t = exc_text.strip()
-
-        # Detect specific "Issue X date" substitution and echo Issue number when found
         m_issue_mention = re.search(r"\bIssue\s+([0-9A-Za-z]+)\b", t, flags=re.IGNORECASE)
         issue_in_h = m_issue_mention.group(1) if m_issue_mention else None
 
@@ -317,7 +305,6 @@ def summarize_g_h_sections(req_text: Optional[str], exc_text: Optional[str]) -> 
                 )
             bullets_h.append("All other Service Bulletin instructions remain unchanged.")
         else:
-            # Generic exception paraphrase if not the date-substitution pattern
             sentences = re.split(r'(?<=[.!?])\s+', t)
             for s in sentences:
                 s = s.strip()
@@ -518,23 +505,18 @@ def _image_flowable_fit(source_bytes: Optional[bytes] = None, path_or_url: Optio
 
 
 # -----------------------------
-# Watermark helper
+# Watermark helper (always used)
 # -----------------------------
-def _watermark_callbacks_or_none(watermark_text: Optional[str]):
-    """Return (on_first_page, on_later_pages) callbacks for doc.build if watermark_text provided."""
-    if not watermark_text:
-        return None, None
-
+def _watermark_callbacks(watermark_text: str):
+    """Return (on_first_page, on_later_pages) callbacks for doc.build with a fixed watermark."""
     def _draw_watermark(canv, doc):
         try:
             width, height = doc.pagesize
         except Exception:
-            width, height = A4  # fallback
-
+            width, height = A4
         canv.saveState()
-        # Soft gray, big, centered diagonal
         try:
-            canv.setFillAlpha(0.15)  # transparency if supported
+            canv.setFillAlpha(0.15)
         except Exception:
             pass
         canv.setFont("Helvetica-Bold", 80)
@@ -543,7 +525,6 @@ def _watermark_callbacks_or_none(watermark_text: Optional[str]):
         canv.rotate(45)
         canv.drawCentredString(0, 0, watermark_text)
         canv.restoreState()
-
     return _draw_watermark, _draw_watermark
 
 
@@ -580,7 +561,6 @@ def build_pdf_report(
         logo_buf.seek(0)
         logo_flowable = Image(logo_buf)
     except Exception:
-        # Fallback: proportional fit (preserves aspect ratio)
         logo_flowable = _image_flowable_fit(path_or_url=logo_url, max_w_mm=40, max_h_mm=20)
 
     buf = io.BytesIO()
@@ -609,7 +589,7 @@ def build_pdf_report(
 
     if logo_flowable:
         story.append(logo_flowable)
-        # Centered, smaller brand line (as requested)
+        # Centered, smaller brand line
         story.append(Paragraph("Feras Aviation Technical Services Ltd.", brand_center_small))
     story.append(Paragraph(f'<font size="12"><a href="{site_url}">{site_url}</a></font>', small))
     story.append(Spacer(1, 6))
@@ -780,13 +760,9 @@ def build_pdf_report(
         story.append(Spacer(1, 12))
         story.append(stamp_flowable)
 
-    # Watermark callbacks
-    on_first, on_later = _watermark_callbacks_or_none(watermark_text)
-
-    if on_first and on_later:
-        doc.build(story, onFirstPage=on_first, onLaterPages=on_later)
-    else:
-        doc.build(story)
+    # Watermark (always)
+    on_first, on_later = _watermark_callbacks(_ALWAYS_WATERMARK_TEXT)
+    doc.build(story, onFirstPage=on_first, onLaterPages=on_later)
 
     buf.seek(0)
     return buf.getvalue()
@@ -800,8 +776,7 @@ def build_tally_pdf(
     logo_url: str,
     site_url: str,
     stamp_bytes: Optional[bytes] = None,
-    stamp_path_or_url: Optional[str] = None,
-    watermark_text: Optional[str] = None
+    stamp_path_or_url: Optional[str] = None
 ) -> bytes:
     """
     rows: list of dicts with keys:
@@ -892,12 +867,9 @@ def build_tally_pdf(
         story.append(Spacer(1, 8))
         story.append(stamp_flowable)
 
-    # Optional watermark on tally as well (follows same toggle)
-    on_first, on_later = _watermark_callbacks_or_none(watermark_text)
-    if on_first and on_later:
-        doc.build(story, onFirstPage=on_first, onLaterPages=on_later)
-    else:
-        doc.build(story)
+    # Always add DEMO watermark to tally
+    on_first, on_later = _watermark_callbacks(_ALWAYS_WATERMARK_TEXT)
+    doc.build(story, onFirstPage=on_first, onLaterPages=on_later)
 
     buf.seek(0)
     return buf.getvalue()
@@ -940,16 +912,9 @@ def _parse_methods(val) -> List[str]:
     return parts
 
 def build_records_for_ad(ad_no: str, df_records: pd.DataFrame) -> List[Dict]:
-    """
-    Expect df_records columns (case-insensitive accepted):
-    AD Number, Status, Method, Method Other, Applic Aircraft, Serials,
-    Performed Date, Performed Hours, Performed Cycles,
-    Repetitive, Interval Value, Interval Unit, Basis
-    """
     if df_records is None or df_records.empty:
         return []
 
-    # Normalize columns
     colmap = {}
     for c in df_records.columns:
         lc = str(c).strip().lower()
@@ -992,7 +957,6 @@ def build_records_for_ad(ad_no: str, df_records: pd.DataFrame) -> List[Dict]:
             "next_due": None,
         }
 
-        # Compute next_due similar to UI logic
         next_due = {}
         if repetitive:
             if interval_unit.lower() == "hours" and hours_val is not None and interval_value is not None:
@@ -1036,7 +1000,6 @@ if ad_number:
         with st.spinner("📄 Extracting AD details..."):
             details = extract_details(data['html_url'], api_doc)
 
-        # Determine ATA: subject -> SB-based -> heuristics
         detected_ata = detect_ata_from_subject(details.get("_full_html_text",""))
         if not detected_ata:
             detected_ata = detect_ata_fallback(details.get("_full_html_text",""), details.get("sb_references"))
@@ -1062,7 +1025,7 @@ if ad_number:
         if eff_display:
             data["effective_date"] = eff_display
 
-        st.subheading = st.subheader  # alias to avoid accidental mistakes later
+        st.subheading = st.subheader  # alias
 
         st.subheader("🛩️ Applicability / Affected Aircraft")
         st.write(details.get("affected_aircraft") or "N/A")
@@ -1071,7 +1034,6 @@ if ad_number:
         sb_list = details.get("sb_references") or []
         st.write(", ".join(sb_list) if sb_list else "N/A")
 
-        # --- (g) and (h) structured, NUMBERED summaries in UI ---
         st.subheader("🔧 (g) Required Actions — key points")
         bullets_g, bullets_h = summarize_g_h_sections(
             details.get("required_actions"),
@@ -1089,7 +1051,6 @@ if ad_number:
             st.write("N/A")
 
         st.markdown("---")
-        # Existing raw sections (unchanged)
         st.subheader("🔧 Required Actions (raw section)")
         st.write(details.get("required_actions") or "N/A")
 
@@ -1245,7 +1206,7 @@ if ad_number:
                         ata_chapter=ata_chapter if ata_chapter else detect_ata_fallback(details.get("_full_html_text",""), details.get("sb_references")),
                         stamp_bytes=stamp_bytes_data,
                         stamp_path_or_url=stamp_path_or_url if stamp_bytes_data is None else None,
-                        watermark_text=("DEMO" if add_demo_watermark else None)
+                        watermark_text="DEMO",   # always ON
                     )
                     st.download_button(
                         "Download AD Report (PDF)",
@@ -1288,23 +1249,19 @@ if xlsx is not None and (not PANDAS_AVAILABLE or not PYPDF2_AVAILABLE or not REP
 if xlsx is not None and PANDAS_AVAILABLE and PYPDF2_AVAILABLE and REPORTLAB_AVAILABLE:
     if st.button("Generate merged PDF with tally"):
         try:
-            # Read all sheets so we can access the 'Records' sheet
             sheets = pd.read_excel(xlsx, sheet_name=None)  # requires openpyxl
         except Exception as e:
             st.error(f"Failed to read Excel file: {e}")
             sheets = None
 
         if sheets is not None:
-            # Find main sheet (first sheet by order)
             if len(sheets) == 0:
                 st.error("The workbook is empty.")
             else:
-                # First sheet is AD list
                 first_sheet_name = list(sheets.keys())[0]
                 df_main = sheets[first_sheet_name]
                 df_records = sheets.get("Records", None)
 
-                # try to find AD column
                 ad_col = None
                 for c in df_main.columns:
                     if str(c).strip().lower() in {"ad number", "ad_number", "ad"}:
@@ -1316,11 +1273,10 @@ if xlsx is not None and PANDAS_AVAILABLE and PYPDF2_AVAILABLE and REPORTLAB_AVAI
                     merger = PdfMerger()
                     tally_rows = []
 
-                    # Prepare stamp bytes once (used ONLY for tally sheet per your request)
+                    # Stamp used ONLY on tally sheet
                     tally_stamp_bytes = stamp_file.read() if stamp_file is not None else None
                     tally_stamp_url = stamp_path_or_url if tally_stamp_bytes is None else None
 
-                    # Iterate ADs
                     for idx, row in df_main.iterrows():
                         ad_no = str(row[ad_col]).strip()
                         if not ad_no or ad_no.lower() == "nan":
@@ -1328,7 +1284,6 @@ if xlsx is not None and PANDAS_AVAILABLE and PYPDF2_AVAILABLE and REPORTLAB_AVAI
 
                         row_customer = ""
                         row_aircraft = ""
-                        # optional columns
                         for col in df_main.columns:
                             cl = str(col).strip().lower()
                             if cl == "customer":
@@ -1338,7 +1293,6 @@ if xlsx is not None and PANDAS_AVAILABLE and PYPDF2_AVAILABLE and REPORTLAB_AVAI
                                 v = row[col]
                                 row_aircraft = "" if (isinstance(v, float) and pd.isna(v)) else str(v)
 
-                        # fetch AD data
                         data = fetch_ad_data(ad_no)
                         if not data:
                             st.warning(f"Skipping {ad_no}: not found.")
@@ -1351,7 +1305,6 @@ if xlsx is not None and PANDAS_AVAILABLE and PYPDF2_AVAILABLE and REPORTLAB_AVAI
                         if not detected_ata:
                             detected_ata = detect_ata_fallback(details.get("_full_html_text",""), details.get("sb_references"))
 
-                        # Resolve effective date
                         api_eff_field_iso = (data.get("effective_date") or "").strip()
                         effective_resolved_iso = api_eff_field_iso if api_eff_field_iso and api_eff_field_iso.upper() != "N/A" else None
                         if not effective_resolved_iso:
@@ -1363,7 +1316,6 @@ if xlsx is not None and PANDAS_AVAILABLE and PYPDF2_AVAILABLE and REPORTLAB_AVAI
                         if eff_display:
                             data["effective_date"] = eff_display
 
-                        # Build compliance records from Records sheet (Option B)
                         records_for_this_ad = []
                         if df_records is not None and not df_records.empty:
                             try:
@@ -1371,7 +1323,7 @@ if xlsx is not None and PANDAS_AVAILABLE and PYPDF2_AVAILABLE and REPORTLAB_AVAI
                             except Exception as e:
                                 st.warning(f"Failed to parse records for {ad_no}: {e}")
 
-                        # Single report PDF in-memory (NO stamp here, stamp only on tally)
+                        # No stamp on individual reports; DEMO watermark always on
                         try:
                             pdf_bytes = build_pdf_report(
                                 ad_data=data,
@@ -1382,16 +1334,15 @@ if xlsx is not None and PANDAS_AVAILABLE and PYPDF2_AVAILABLE and REPORTLAB_AVAI
                                 customer=row_customer or customer_for_report,
                                 aircraft=row_aircraft,
                                 ata_chapter=detected_ata,
-                                stamp_bytes=None,  # limit stamp to tally sheet only
+                                stamp_bytes=None,
                                 stamp_path_or_url=None,
-                                watermark_text=("DEMO" if add_demo_watermark else None)
+                                watermark_text="DEMO"
                             )
                             merger.append(io.BytesIO(pdf_bytes))
                         except Exception as e:
                             st.warning(f"Failed to build PDF for {ad_no}: {e}")
                             continue
 
-                        # Add to tally
                         tally_rows.append({
                             "ad_number": ad_no,
                             "document_number": data.get("document_number", ""),
@@ -1401,21 +1352,19 @@ if xlsx is not None and PANDAS_AVAILABLE and PYPDF2_AVAILABLE and REPORTLAB_AVAI
                             "ata": detected_ata or "",
                         })
 
-                    # Build tally sheet PDF and append to merger
+                    # Build tally sheet PDF (with stamp if provided) and append
                     try:
                         tally_pdf = build_tally_pdf(
                             rows=tally_rows,
-                            logo_url=LOGO_URL,     # preserve AR on tally via helper
+                            logo_url=LOGO_URL,
                             site_url=SITE_URL,
                             stamp_bytes=tally_stamp_bytes,
-                            stamp_path_or_url=tally_stamp_url,
-                            watermark_text=("DEMO" if add_demo_watermark else None)
+                            stamp_path_or_url=tally_stamp_url
                         )
                         merger.append(io.BytesIO(tally_pdf))
                     except Exception as e:
                         st.warning(f"Failed to build/append tally sheet: {e}")
 
-                    # Output merged
                     out_buf = io.BytesIO()
                     merger.write(out_buf)
                     merger.close()
