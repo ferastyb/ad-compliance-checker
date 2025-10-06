@@ -66,8 +66,7 @@ st.markdown("**PDF Stamp (optional)**")
 stamp_file = st.file_uploader("Upload stamp image (PNG/JPG)", type=["png", "jpg", "jpeg"])
 stamp_path_or_url = st.text_input("Or paste a stamp file path / URL (optional)").strip()
 
-# Watermark toggle
-add_demo_watermark = st.checkbox("Add 'DEMO' watermark to PDF(s)", value=False)
+
 
 
 # -----------------------------
