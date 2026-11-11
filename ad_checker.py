@@ -1374,4 +1374,4 @@ if xlsx is not None and PANDAS_AVAILABLE and PYPDF2_AVAILABLE and REPORTLAB_AVAI
                         data=out_buf.getvalue(),
                         file_name="AD_Merged_Report.pdf",
                         mime="application/pdf",
-                    )
+    )
