@@ -42,7 +42,7 @@ except Exception:
 # -----------------------------
 st.set_page_config(page_title="FAA AD Compliance Checker", layout="centered")
 
-LOGO_URL = "https://www.ferasaviation.info/gallery/FA__logo.png?ts=1754692591"
+
 SITE_URL = "https://www.faviation.co.uk"
 
 # UI logo
