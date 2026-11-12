@@ -42,11 +42,11 @@ except Exception:
 # -----------------------------
 st.set_page_config(page_title="FAA AD Compliance Checker", layout="centered")
 
-***LOGO_URL = "https://www.ferasaviation.info/gallery/FA__logo.png?ts=1754692591"***
+# LOGO_URL = "https://www.ferasaviation.info/gallery/FA__logo.png?ts=1754692591"
 SITE_URL = "https://www.faviation.co.uk"
 
 # UI logo
-***st.image(LOGO_URL, width=180)***
+# st.image(LOGO_URL, width=180)
 st.markdown(f"[www.faviation.co.uk]({SITE_URL})")
 
 st.title("AD Compliance Checker")
